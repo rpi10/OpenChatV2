@@ -1,0 +1,87 @@
+body { display: flex; height: 100vh; margin: 0; }
+#sidebar { width: 200px; padding: 10px; background: #f4f4f4; border-right: 1px solid #ccc; overflow-y: auto; }
+#chat-area { flex: 1; padding: 10px; display: flex; flex-direction: column; }
+ul { list-style-type: none; padding: 0; margin: 0; }
+li { padding: 8px; margin-bottom: 10px; border-radius: 5px; cursor: pointer; position: relative; }
+li.selected { background: #ddd; }
+#form { display: flex; align-items: center; }
+input { padding: 10px; border-radius: 5px; border: 1px solid #ccc; flex: 1; }
+#send {
+    padding: 0;
+    border-radius: 5px;
+    border: none;
+    margin-left: 10px;
+    cursor: pointer;
+    background: url('https://media.istockphoto.com/id/1290684294/vector/send-message-icon.jpg?s=612x612&w=0&k=20&c=8vwd4PDMzEELKMUrTQ7LZnpngAN5Bzs55sRJ09sA8FU=') no-repeat center center;
+    background-size: cover;
+    width: 40px;
+    height: 40px;
+}
+#messages { flex: 1; overflow-y: auto; }
+.message-from-me { background-color: #E2FFC7; color: black; text-align: left; }
+.message-from-others { background-color: #f1ecec; color: black; }
+#chat-header { margin-bottom: 20px; font-weight: bold; }
+.online-status {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-right: 5px;
+}
+.online { background-color: green; }
+.offline { background-color: red; }
+#login-screen {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0, 0, 0, 0.5);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 1000;
+}
+#login-box {
+    background: white;
+    padding: 20px;
+    border-radius: 8px;
+    text-align: center;
+    box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1);
+}
+#login-box input {
+    padding: 10px;
+    margin-bottom: 10px;
+    border-radius: 5px;
+    border: 1px solid #ccc;
+    width: 100%;
+    box-sizing: border-box;
+}
+#login-box button {
+    padding: 10px 20px;
+    border-radius: 5px;
+    border: none;
+    background-color: #007bff;
+    color: white;
+    cursor: pointer;
+    width: 100%;
+}
+#login-box button:hover {
+    background-color: #0056b3;
+}
+.unseen-count {
+    background-color: red;
+    color: white;
+    border-radius: 50%;
+    padding: 2px 6px;
+    font-size: 12px;
+    margin-left: 5px;
+    position: absolute;
+    top: 5px;
+    right: 10px;
+}
+@media (max-width: 768px) {
+    #sidebar { width: 100%; max-width: none; height: auto; position: static; border-right: none; border-bottom: 1px solid #ccc; }
+    #chat-area { width: 100%; margin-left: 0; }
+    button { width: 35px; height: 35px; }
+}
