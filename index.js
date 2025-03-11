@@ -277,34 +277,45 @@ async function registerGeneralUser(username, password) {
 // New Endpoint to Link External Databases
 // ----------------------------
 app.post('/link-database', async (req, res) => {
-    const { externalAuthenticator, username } = req.body;
-    if (!externalAuthenticator) {
-      return res.status(400).json({ error: 'Authenticator is required' });
+  const { externalAuthenticator, username } = req.body;
+  // Use session username if available; otherwise, require a username in the request
+  const userForLink = req.session.username || username;
+  if (!externalAuthenticator || !userForLink) {
+    return res.status(400).json({ error: 'Authenticator and username are required.' });
+  }
+  try {
+    // Look up the external database info from the general MongoDB database
+    const generalUser = await GeneralUser.findOne({ authentificator: externalAuthenticator }).exec();
+    if (!generalUser) {
+      return res.status(404).json({ error: 'Authenticator not found.' });
     }
-    if (!req.session.username && !username) {
-      return res.status(400).json({ error: 'Username is required' });
-    }
-    // Use the session username if available; otherwise, use the one passed in
-    const userForLink = req.session.username || username;
+    const externalDatabaseURL = generalUser.database_url;
     
-    try {
-      // Look up the external database info from the general MongoDB database
-      const generalUser = await GeneralUser.findOne({ authentificator: externalAuthenticator }).exec();
-      if (!generalUser) {
-        return res.status(404).json({ error: 'Authenticator not found' });
-      }
-      const externalDatabaseURL = generalUser.database_url;
-      // Insert the external database link into the personal PostgreSQL database
-      await personalPool.query(
-        'INSERT INTO external_databases (username, authentificator, database_url) VALUES ($1, $2, $3)',
-        [userForLink, externalAuthenticator, externalDatabaseURL]
-      );
-      res.json({ message: 'External database linked successfully.' });
-    } catch (err) {
-      console.error('Error linking database:', err);
-      res.status(500).json({ error: 'Internal server error.' });
-    }
-  });
+    // Insert into local external_databases table
+    await personalPool.query(
+      'INSERT INTO external_databases (username, authentificator, database_url) VALUES ($1, $2, $3)',
+      [userForLink, externalAuthenticator, externalDatabaseURL]
+    );
+    
+    // Connect to the external database and insert the user into its users table.
+    const externalPool = new Pool({
+      connectionString: externalDatabaseURL,
+      ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+    });
+    await externalPool.query(
+      `INSERT INTO users (username, password, online)
+       VALUES ($1, $2, FALSE)
+       ON CONFLICT (username) DO NOTHING`,
+      [userForLink, null]  // Pass null (or a default value) for password if not required.
+    );
+    
+    res.json({ message: 'External database linked and user added successfully.' });
+  } catch (err) {
+    console.error('Error linking database:', err);
+    res.status(500).json({ error: 'Internal server error.' });
+  }
+});
+
   
 
 // ----------------------------
@@ -570,19 +581,39 @@ function loadPrivateMessageHistory(user1, user2, callback) {
   });
 }
 
-function updateUsersList() {
-  personalPool.query('SELECT username, online FROM users', (err, result) => {
-    if (err) {
-      console.error('Error fetching users list:', err);
-      return;
+async function updateUsersList() {
+  try {
+    // Get local users.
+    const localResult = await personalPool.query('SELECT username, online FROM users');
+    let allUsers = localResult.rows;
+    
+    // Get all external database links for the current user.
+    const externalLinks = await personalPool.query('SELECT * FROM external_databases WHERE username = $1', [currentUser]);
+    
+    // For each external database, connect and fetch its users.
+    for (const link of externalLinks.rows) {
+      const externalPool = new Pool({
+        connectionString: link.database_url,
+        ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+      });
+      const externalUsersResult = await externalPool.query('SELECT username, online FROM users');
+      allUsers = allUsers.concat(externalUsersResult.rows);
     }
-    const userList = result.rows.map(row => ({
-      username: row.username,
-      online: row.online,
-    }));
+    
+    // Remove duplicates and filter out the current user.
+    const uniqueUsers = {};
+    allUsers.forEach(u => {
+      if (u.username !== currentUser) {
+        uniqueUsers[u.username] = u;
+      }
+    });
+    const userList = Object.values(uniqueUsers);
+    
     io.emit('users', userList);
     console.log('Users list updated:', userList);
-  });
+  } catch (err) {
+    console.error('Error fetching users list:', err);
+  }
 }
 
 function formatDate(date) {
