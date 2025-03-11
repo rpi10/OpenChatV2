@@ -581,36 +581,41 @@ function loadPrivateMessageHistory(user1, user2, callback) {
   });
 }
 
-async function updateUsersList() {
+async function updateUsersListFor(username) {
   try {
-    // Get local users.
-    const localResult = await personalPool.query('SELECT username, online FROM users');
+    // Get local users excluding the given username.
+    const localResult = await personalPool.query(
+      'SELECT username, online FROM users WHERE username <> $1',
+      [username]
+    );
     let allUsers = localResult.rows;
     
-    // Get all external database links for the current user.
-    const externalLinks = await personalPool.query('SELECT * FROM external_databases WHERE username = $1', [currentUser]);
+    const externalLinksResult = await personalPool.query(
+      'SELECT * FROM external_databases WHERE username = $1',
+      [username]
+    );
     
-    // For each external database, connect and fetch its users.
-    for (const link of externalLinks.rows) {
+    for (const link of externalLinksResult.rows) {
       const externalPool = new Pool({
         connectionString: link.database_url,
         ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
       });
-      const externalUsersResult = await externalPool.query('SELECT username, online FROM users');
+      const externalUsersResult = await externalPool.query(
+        'SELECT username, online FROM users WHERE username <> $1',
+        [username]
+      );
       allUsers = allUsers.concat(externalUsersResult.rows);
     }
     
-    // Remove duplicates and filter out the current user.
+    // Remove duplicates.
     const uniqueUsers = {};
     allUsers.forEach(u => {
-      if (u.username !== currentUser) {
-        uniqueUsers[u.username] = u;
-      }
+      uniqueUsers[u.username] = u;
     });
     const userList = Object.values(uniqueUsers);
     
     io.emit('users', userList);
-    console.log('Users list updated:', userList);
+    console.log('Global users list updated for', username, ':', userList);
   } catch (err) {
     console.error('Error fetching users list:', err);
   }
