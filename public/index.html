@@ -19,27 +19,44 @@
 
   <!-- Chat Interface -->
   <div id="sidebar">
-    <h2>Users</h2>
+    <div id="sidebar-header">
+      <h2>Users</h2>
+      <!-- Plus button to add external database -->
+      <button id="add-database-btn" title="Add External Database">+</button>
+    </div>
     <ul id="users-list"></ul>
   </div>
   <div id="chat-area">
     <h2 id="chat-header">Chat</h2>
     <ul id="messages"></ul>
 
-    <!-- Hidden File Input (New) -->
+    <!-- Hidden File Input -->
     <input type="file" id="fileInput" style="display: none;" />
 
     <!-- Message Form -->
     <form id="form" action="">
-      <!-- New Attachment Button -->
+      <!-- Attachment Button -->
       <button type="button" id="attachButton" title="Attach a file"></button>
       
       <!-- Message Input -->
       <input id="input" autocomplete="off" placeholder="Type a message..."/>
-      
+    
+      <!-- Record Button -->
+      <button type="button" id="recordButton" title="Hold to record voice"></button>
+    
       <!-- Send Button -->
       <button type="submit" id="send"></button>
     </form>
+  </div>
+
+  <!-- Modal for External Database Linking -->
+  <div id="link-database-modal" class="modal" style="display: none;">
+    <div class="modal-content">
+      <span class="close" id="close-modal">&times;</span>
+      <p>Your Authentificator: <span id="your-authenticator"></span></p>
+      <input id="external-authenticator-input" type="text" placeholder="Enter external authentificator" />
+      <button id="link-database-submit">Link Database</button>
+    </div>
   </div>
 
   <!-- Notification sound -->
@@ -47,6 +64,5 @@
 
   <script src="/socket.io/socket.io.js"></script>
   <script src="script.js"></script>
-  
 </body>
 </html>
