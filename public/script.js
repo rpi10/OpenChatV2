@@ -7,10 +7,30 @@ const loginScreen = document.getElementById('login-screen');
 const loginButton = document.getElementById('login-button');
 const usernameInput = document.getElementById('username-input');
 const passwordInput = document.getElementById('password-input');
+const recordButton = document.getElementById('recordButton');
+let mediaRecorder;
+let audioChunks = [];
 let currentUser = null;
 let currentConversation = null;
 let unseenMessages = {};
+let currentUserAuthenticator = null; // Global for storing the user's authentificator
 
+// Global variable for grouping day headers
+let lastDisplayedDay = null;
+const audioPreviewContainer = document.createElement('div');
+audioPreviewContainer.id = 'audioPreviewContainer';
+audioPreviewContainer.style.position = 'fixed';
+audioPreviewContainer.style.bottom = '80px';
+audioPreviewContainer.style.left = '50%';
+audioPreviewContainer.style.transform = 'translateX(-50%)';
+audioPreviewContainer.style.backgroundColor = '#fff';
+audioPreviewContainer.style.padding = '10px';
+audioPreviewContainer.style.border = '1px solid #ccc';
+audioPreviewContainer.style.borderRadius = '8px';
+audioPreviewContainer.style.display = 'none';
+document.body.appendChild(audioPreviewContainer);
+
+/** Debug Fetch Wrapper **/
 function debugFetch(url, options) {
   console.log(`Fetching ${url} with options:`, options);
   return fetch(url, options).then(async response => {
@@ -32,12 +52,7 @@ function debugFetch(url, options) {
   });
 }
 
-// Global variable for grouping day headers
-let lastDisplayedDay = null;
-
-// ---------------------------
-// Service Worker Registration
-// ---------------------------
+/** Service Worker Registration **/
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js')
     .then(registration => {
@@ -48,9 +63,7 @@ if ('serviceWorker' in navigator) {
     });
 }
 
-// ---------------------------
-// Request Notification Permission
-// ---------------------------
+/** Request Notification Permission **/
 function requestNotificationPermission() {
   if (Notification.permission === 'default') {
     Notification.requestPermission().then(permission => {
@@ -64,28 +77,25 @@ function requestNotificationPermission() {
 }
 requestNotificationPermission();
 
-// ---------------------------
-// Auto-login if Credentials Are Stored
-// ---------------------------
+/** Auto-login if Credentials Are Stored & Initialize Mobile Nav **/
 document.addEventListener('DOMContentLoaded', () => {
   const savedUsername = localStorage.getItem('username');
   const savedPassword = localStorage.getItem('password');
   if (savedUsername && savedPassword) {
     socket.emit('login', { username: savedUsername, password: savedPassword });
   }
+  initializeMobileNav(); // Initialize mobile navigation when page loads
 });
 
-// ---------------------------
-// Play Beep Sound for New Messages
-// ---------------------------
+/** Play Beep Sound for New Messages **/
 function playBeep() {
   const beepSound = document.getElementById('beep-sound');
-  beepSound.play();
+  if (beepSound) {
+    beepSound.play();
+  }
 }
 
-// ---------------------------
-// Show Notification for Incoming Messages
-// ---------------------------
+/** Show Notification for Incoming Messages **/
 function showNotification(title, body) {
   if ('Notification' in window && Notification.permission === 'granted') {
     navigator.serviceWorker.ready.then(function(registration) {
@@ -99,52 +109,55 @@ function showNotification(title, body) {
   }
 }
 
-// ---------------------------
-// Display text message
-// ---------------------------
+/** Display a text message **/
 function displayMessage({ from, msg, timestamp, dayLabel }) {
   if (lastDisplayedDay !== dayLabel) {
     const header = document.createElement('li');
     header.className = 'day-header';
     header.textContent = dayLabel;
+    header.style.listStyleType = 'none';
     messages.appendChild(header);
     lastDisplayedDay = dayLabel;
   }
   const bubble = document.createElement('li');
   bubble.className = from === currentUser ? 'message-from-me' : 'message-from-others';
+  bubble.style.listStyleType = 'none';
+  if (bubble.classList.contains('message-from-others')) {
+    bubble.style.marginLeft = '5px';
+  }
   bubble.innerHTML = `<p class="message-text">${msg}</p>
                       <span class="message-time">${timestamp}</span>`;
   messages.appendChild(bubble);
   messages.scrollTop = messages.scrollHeight;
 }
 
-// ---------------------------
-// Display file message with preview in the bubble
-// ---------------------------
-function displayFileMessage({ from, fileUrl, name, type, timestamp, dayLabel }) {
+function displayFileMessage({ from, fileUrl, name, type, timestamp, dayLabel, recorded }) {
   const bubble = document.createElement('li');
   bubble.className = from === currentUser ? 'message-from-me' : 'message-from-others';
+  bubble.style.listStyleType = 'none';
+  if (bubble.classList.contains('message-from-others')) {
+    bubble.style.marginLeft = '5px';
+  }
   
   let content = '';
-  if (type.startsWith('image/')) {
+  if (type.startsWith('audio/')) {
+    // Audio message with transcript button
     content = `
-      <div class="file-message">
-        <img src="${fileUrl}" alt="${name}" style="max-width: 200px; max-height: 200px; border-radius: 8px; margin-bottom: 5px;">
-        <div class="file-info">
-          <a href="${fileUrl}" download="${name}" class="file-name">${name}</a>
-        </div>
-      </div>
-    `;
-  } else if (type.startsWith('audio/')) {
-    content = `
-      <div class="file-message">
-        <audio controls style="max-width: 200px; margin-bottom: 5px;">
+      <div class="file-message" style="position: relative;">
+        <audio controls style="max-width: 200px; margin-bottom: 9px;">
           <source src="${fileUrl}" type="${type}">
           Your browser does not support the audio element.
         </audio>
         <div class="file-info">
-          <a href="${fileUrl}" download="${name}" class="file-name">${name}</a>
+          <button class="transcript-btn">Transcript</button>
         </div>
+      </div>
+    `;
+  } else if (type.startsWith('image/')) {
+    content = `
+      <div class="file-message">
+        <img src="${fileUrl}" alt="${name}" style="max-width: 200px; max-height: 200px; border-radius: 8px; margin-bottom: 13px; cursor: pointer;">
+        <div class="file-info"></div>
       </div>
     `;
   } else if (type.startsWith('video/')) {
@@ -154,32 +167,46 @@ function displayFileMessage({ from, fileUrl, name, type, timestamp, dayLabel }) 
           <source src="${fileUrl}" type="${type}">
           Your browser does not support the video element.
         </video>
-        <div class="file-info">
-          <a href="${fileUrl}" download="${name}" class="file-name">${name}</a>
-        </div>
+        <div class="file-info"></div>
       </div>
     `;
   } else {
     content = `
       <div class="file-message">
-        <div class="file-icon">
-          <img src="https://cdn-icons-png.flaticon.com/512/2965/2965332.png" alt="File" style="width: 40px; height: 40px;">
-        </div>
+        <div class="file-icon"></div>
         <div class="file-info">
-          <a href="${fileUrl}" download="${name}" class="file-name">${name}</a>
+          <a href="${fileUrl}" download="${name}" class="file-name">
+            ${name}<img src="download.png" alt="File" style="width: 40px; height: 40px;">
+          </a>
         </div>
       </div>
     `;
   }
+  
   content += `<span class="message-time">${timestamp}</span>`;
   bubble.innerHTML = content;
+  
+  if (type.startsWith('audio/')) {
+    const transcriptBtn = bubble.querySelector('.transcript-btn');
+    if (transcriptBtn) {
+      transcriptBtn.addEventListener('click', () => {
+        transcribeAudio(fileUrl, bubble);
+      });
+    }
+  }
+  
+  if (type.startsWith('image/')) {
+    const img = bubble.querySelector('img');
+    if (img) {
+      img.addEventListener('click', () => showImageModal(img));
+    }
+  }
+  
   messages.appendChild(bubble);
   messages.scrollTop = messages.scrollHeight;
 }
 
-// ---------------------------
-// Handle Login/Signup events
-// ---------------------------
+/** Handle Login/Signup events **/
 loginButton.addEventListener('click', () => {
   const username = usernameInput.value.trim();
   const password = passwordInput.value.trim();
@@ -192,8 +219,12 @@ loginButton.addEventListener('click', () => {
   }
 });
 
-socket.on('login success', (username) => {
-  currentUser = username;
+socket.on('login success', (data) => {
+  console.log('Login success event received:', data);
+  if (data && data.username && data.authentificator) {
+    currentUser = data.username;
+    currentUserAuthenticator = data.authentificator; // Save authentificator globally
+  }
   loginScreen.style.display = 'none';
   socket.emit('load users');
   subscribeToPushNotifications();
@@ -236,10 +267,60 @@ socket.on('password setup successful', () => {
 socket.on('setup failed', (message) => {
   alert(message);
 });
-  
-// ---------------------------
-// Handle Receiving Chat Messages
-// ---------------------------
+
+/** LINK DATABASE HANDLING **/
+// Changed to use an HTTP POST request to '/link-database'
+document.addEventListener('DOMContentLoaded', () => {
+  const addDatabaseBtn = document.getElementById('add-database-btn');
+  const linkDatabaseModal = document.getElementById('link-database-modal');
+  const closeModalBtn = document.getElementById('close-modal');
+  const linkDatabaseSubmit = document.getElementById('link-database-submit');
+  const yourAuthenticatorSpan = document.getElementById('your-authenticator');
+  const externalAuthenticatorInput = document.getElementById('external-authenticator-input');
+
+  addDatabaseBtn.addEventListener('click', () => {
+    console.log('Plus button clicked. Current authentificator:', currentUserAuthenticator);
+    linkDatabaseModal.style.display = 'block';
+    yourAuthenticatorSpan.textContent = currentUserAuthenticator || 'Not set';
+  });
+
+  closeModalBtn.addEventListener('click', () => {
+    linkDatabaseModal.style.display = 'none';
+  });
+
+  window.addEventListener('click', (event) => {
+    if (event.target === linkDatabaseModal) {
+      linkDatabaseModal.style.display = 'none';
+    }
+  });
+
+  linkDatabaseSubmit.addEventListener('click', async () => {
+    const externalAuthenticator = externalAuthenticatorInput.value.trim();
+    if (!externalAuthenticator) {
+      alert('Please enter an authentificator.');
+      return;
+    }
+    try {
+      const response = await debugFetch('/link-database', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: currentUser, externalAuthenticator })
+      });
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Linking database failed');
+      }
+      const data = await response.json();
+      alert(data.message);
+    } catch (error) {
+      alert('Error linking database: ' + error.message);
+    }
+    externalAuthenticatorInput.value = '';
+    linkDatabaseModal.style.display = 'none';
+  });
+});
+
+/** Handle Receiving Chat Messages **/
 socket.on('chat message', (data) => {
   displayMessage(data);
   if (data.from !== currentUser) {
@@ -275,10 +356,11 @@ socket.on('chat history', (msgs) => {
       displayFileMessage({
         from: msg.from,
         fileUrl: msg.fileUrl,
-        name: msg.fileName,   // mapping DB field to display field
+        name: msg.fileName,
         type: msg.fileType,
         timestamp: msg.timestamp,
-        dayLabel: msg.dayLabel
+        dayLabel: msg.dayLabel,
+        recorded: msg.recorded
       });
     } else {
       displayMessage(msg);
@@ -301,9 +383,14 @@ socket.on('users', (usersArr) => {
   });
 });
 
+/** Update Conversation with Mobile Navigation **/
 function updateConversation(conversation) {
   currentConversation = conversation;
-  document.getElementById('chat-header').textContent = `Chat with ${conversation}`;
+  const chatHeader = document.getElementById('chat-header');
+  chatHeader.innerHTML = `
+    <button class="back-button">←</button>
+    <h2>Chat with ${conversation}</h2>
+  `;
   document.querySelectorAll('#users-list li').forEach(li => li.classList.remove('selected'));
   const item = Array.from(usersList.children).find(li => li.textContent.trim().includes(conversation));
   if (item) {
@@ -312,6 +399,12 @@ function updateConversation(conversation) {
   lastDisplayedDay = null;
   messages.innerHTML = '';
   socket.emit('load messages', { user: currentConversation });
+  
+  if (window.innerWidth <= 768) {
+    showChat();
+  }
+  
+  document.querySelector('.back-button').addEventListener('click', showUsersList);
 }
   
 form.addEventListener('submit', (e) => {
@@ -322,64 +415,42 @@ form.addEventListener('submit', (e) => {
   }
 });
 
-// ---------------------------
-// FILE UPLOAD FUNCTIONALITY
-// ---------------------------
-// Get the attachment button and hidden file input
+/** FILE UPLOAD FUNCTIONALITY **/
 const attachButton = document.getElementById('attachButton');
 const fileInput = document.getElementById('fileInput');
 
-// When the attachment button is clicked, trigger the file input dialog
 attachButton.addEventListener('click', (e) => {
   e.preventDefault();
   fileInput.click();
 });
 
-// When a file is selected, automatically upload it
 fileInput.addEventListener('change', async (e) => {
   e.preventDefault();
-  
   const file = fileInput.files[0];
   if (!file) {
     alert("Please select a file to upload.");
     return;
   }
-  
   if (!currentConversation) {
     alert("Please select a conversation first.");
-    fileInput.value = ""; // Reset file input if no conversation is selected
+    fileInput.value = "";
     return;
   }
-
-  // Show loading state by disabling the attachment button
   attachButton.disabled = true;
-  
   const formData = new FormData();
   formData.append('file', file);
-
   try {
-    console.log('Starting upload for file:', {
-      name: file.name,
-      type: file.type,
-      size: file.size
-    });
-
     const response = await debugFetch('/upload', {
       method: 'POST',
       body: formData
     });
-    
     if (!response.ok) {
       const errorData = await response.json();
       throw new Error(errorData.error || 'Upload failed');
     }
-
     const data = await response.json();
-    console.log('Upload successful:', data);
-
     if (data.url) {
       const now = new Date();
-      
       const fileMessage = {
         to: currentConversation,
         fileUrl: data.url,
@@ -387,13 +458,11 @@ fileInput.addEventListener('change', async (e) => {
         type: file.type,
         size: file.size,
         timestamp: formatTime(now),
-        dayLabel: formatDayLabel(now)
+        dayLabel: formatDayLabel(now),
+        recorded: false
       };
-
-      console.log('Emitting file message:', fileMessage);
       socket.emit('file message', fileMessage);
       fileInput.value = "";
-      
     }
   } catch (error) {
     console.error('Upload error:', error);
@@ -403,6 +472,7 @@ fileInput.addEventListener('change', async (e) => {
   }
 });
 
+/** Push Notifications Subscription **/
 function subscribeToPushNotifications() {
   navigator.serviceWorker.ready.then(function(registration) {
     registration.pushManager.getSubscription().then(function(subscription) {
@@ -433,6 +503,7 @@ function urlB64ToUint8Array(base64String) {
   return outputArray;
 }
 
+/** Helper Functions to Format Time and Day Label **/
 function formatTime(date) {
   const hours = date.getHours().toString().padStart(2, '0');
   const minutes = date.getMinutes().toString().padStart(2, '0');
@@ -445,4 +516,294 @@ function formatDayLabel(date) {
   const month = (date.getMonth() + 1).toString().padStart(2, '0');
   const year = date.getFullYear();
   return `${day}-${month}-${year}`;
+}
+
+/** Mobile Navigation Functions **/
+function initializeMobileNav() {
+  const chatHeader = document.getElementById('chat-header');
+  if (!chatHeader.querySelector('.back-button')) {
+    const backButton = document.createElement('button');
+    backButton.className = 'back-button';
+    backButton.innerHTML = '←';
+    backButton.addEventListener('click', showUsersList);
+    chatHeader.insertBefore(backButton, chatHeader.firstChild);
+  }
+}
+
+function showChat() {
+  document.body.classList.add('chat-active');
+}
+
+function showUsersList() {
+  document.body.classList.remove('chat-active');
+}
+
+/** Modal Image Handling **/
+function createImageModal() {
+  const modal = document.createElement('div');
+  modal.className = 'modal';
+  const modalActions = document.createElement('div');
+  modalActions.className = 'modal-actions';
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'close-modal';
+  closeBtn.innerHTML = '×';
+  const downloadBtn = document.createElement('button');
+  downloadBtn.className = 'download-modal';
+  downloadBtn.textContent = 'Download';
+  modalActions.appendChild(closeBtn);
+  modalActions.appendChild(downloadBtn);
+  const modalImg = document.createElement('img');
+  modalImg.className = 'modal-content';
+  modal.appendChild(modalActions);
+  modal.appendChild(modalImg);
+  document.body.appendChild(modal);
+  return { modal, modalImg, closeBtn, downloadBtn };
+}
+
+const { modal, modalImg, closeBtn, downloadBtn } = createImageModal();
+
+function showImageModal(imgElement) {
+  modal.style.display = 'flex';
+  modalImg.src = imgElement.src;
+  downloadBtn.onclick = () => {
+    const link = document.createElement('a');
+    link.href = imgElement.src;
+    link.download = imgElement.alt || 'image';
+    link.click();
+  };
+  document.body.style.overflow = 'hidden';
+}
+
+closeBtn.onclick = () => {
+  modal.style.display = 'none';
+  document.body.style.overflow = '';
+};
+
+modal.onclick = (e) => {
+  if (e.target === modal) {
+    modal.style.display = 'none';
+    document.body.style.overflow = '';
+  }
+};
+
+// Recording and sending audio
+recordButton.addEventListener('mousedown', async () => {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    alert('Audio recording is not supported in this browser.');
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    mediaRecorder = new MediaRecorder(stream);
+    audioChunks = [];
+    mediaRecorder.ondataavailable = event => {
+      if (event.data.size > 0) {
+        audioChunks.push(event.data);
+      }
+    };
+    mediaRecorder.start();
+    console.log('Recording started...');
+  } catch (err) {
+    console.error('Error accessing microphone:', err);
+    alert('Could not access microphone.');
+  }
+});
+
+recordButton.addEventListener('mouseup', () => {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    mediaRecorder.stop();
+    mediaRecorder.onstop = () => {
+      console.log('Recording stopped.');
+      const audioBlob = new Blob(audioChunks, { type: 'audio/mp3' });
+      showAudioPreview(audioBlob);
+    };
+  }
+});
+
+recordButton.addEventListener('touchstart', async (e) => {
+  e.preventDefault();
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    alert('Audio recording is not supported in this browser.');
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    mediaRecorder = new MediaRecorder(stream);
+    audioChunks = [];
+    mediaRecorder.ondataavailable = event => {
+      if (event.data.size > 0) {
+        audioChunks.push(event.data);
+      }
+    };
+    mediaRecorder.start();
+    console.log('Recording started (touch)...');
+  } catch (err) {
+    console.error('Error accessing microphone:', err);
+    alert('Could not access microphone.');
+  }
+});
+
+recordButton.addEventListener('touchend', (e) => {
+  e.preventDefault();
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    mediaRecorder.stop();
+    mediaRecorder.onstop = () => {
+      console.log('Recording stopped (touch).');
+      const audioBlob = new Blob(audioChunks, { type: 'audio/mp3' });
+      showAudioPreview(audioBlob);
+    };
+  }
+});
+
+// Show audio preview with accept/cancel buttons
+function showAudioPreview(audioBlob) {
+  const audioUrl = URL.createObjectURL(audioBlob);
+  const audioElement = document.createElement('audio');
+  audioElement.controls = true;
+  audioElement.src = audioUrl;
+  const acceptButton = document.createElement('button');
+  acceptButton.textContent = 'Send Audio';
+  acceptButton.style.margin = '5px';
+  acceptButton.addEventListener('click', () => {
+    sendAudioMessage(audioBlob);
+    hideAudioPreview();
+  });
+  const cancelButton = document.createElement('button');
+  cancelButton.textContent = 'Cancel';
+  cancelButton.style.margin = '5px';
+  cancelButton.addEventListener('click', hideAudioPreview);
+  audioPreviewContainer.innerHTML = '';
+  audioPreviewContainer.appendChild(audioElement);
+  audioPreviewContainer.appendChild(acceptButton);
+  audioPreviewContainer.appendChild(cancelButton);
+  audioPreviewContainer.style.display = 'block';
+}
+
+function hideAudioPreview() {
+  audioPreviewContainer.style.display = 'none';
+  audioPreviewContainer.innerHTML = '';
+}
+
+// Upload audio and mark as recorded
+async function sendAudioMessage(audioBlob) {
+  if (!currentConversation) {
+    alert("Please select a conversation first.");
+    return;
+  }
+  
+  const timestamp = Date.now();
+  const file = new File([audioBlob], `audio_${timestamp}.mp3`, { type: 'audio/mp3' });
+  const formData = new FormData();
+  formData.append('file', file);
+  
+  try {
+    const uploadResponse = await debugFetch('/upload', {
+      method: 'POST',
+      body: formData
+    });
+    
+    if (!uploadResponse.ok) {
+      const errorData = await uploadResponse.json();
+      throw new Error(errorData.error || 'Upload failed');
+    }
+    
+    const uploadData = await uploadResponse.json();
+    
+    if (uploadData.url) {
+      const now = new Date();
+      const fileMessage = {
+        to: currentConversation,
+        fileUrl: uploadData.url,
+        name: file.name,
+        type: file.type,
+        size: file.size,
+        timestamp: formatTime(now),
+        dayLabel: formatDayLabel(now),
+        recorded: true
+      };
+      
+      socket.emit('file message', fileMessage);
+    }
+  } catch (error) {
+    console.error('Upload error:', error);
+    alert(`Failed to upload audio: ${error.message}`);
+  }
+}
+
+// Transcribe audio and swap UI
+async function transcribeAudio(fileUrl, bubble) {
+  const originalContent = bubble.innerHTML;
+  const transcriptBtn = bubble.querySelector('.transcript-btn');
+  if (transcriptBtn) {
+    transcriptBtn.disabled = true;
+    transcriptBtn.textContent = 'Transcribing...';
+  }
+  
+  try {
+    const transcribeResponse = await fetch('/transcribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: fileUrl })
+    });
+    
+    if (!transcribeResponse.ok) {
+      const errorData = await transcribeResponse.json();
+      throw new Error(errorData.error || 'Transcription failed');
+    }
+    
+    const data = await transcribeResponse.json();
+    const transcriptionText = data.text;
+    
+    const transcriptHTML = `
+      <div class="transcript-view">
+        <p>${transcriptionText}</p>
+        <button class="return-audio-btn">Return to Audio</button>
+      </div>
+    `;
+    bubble.innerHTML = transcriptHTML;
+    
+    const returnBtn = bubble.querySelector('.return-audio-btn');
+    if (returnBtn) {
+      returnBtn.addEventListener('click', () => {
+        bubble.innerHTML = originalContent;
+        const newTranscriptBtn = bubble.querySelector('.transcript-btn');
+        if (newTranscriptBtn) {
+          newTranscriptBtn.disabled = false;
+          newTranscriptBtn.textContent = 'Transcript';
+          newTranscriptBtn.addEventListener('click', () => {
+            transcribeAudio(fileUrl, bubble);
+          });
+        }
+      });
+    }
+    
+  } catch (error) {
+    console.error("Error during transcription:", error);
+    alert("Error during transcription: " + error.message);
+    if (transcriptBtn) {
+      transcriptBtn.disabled = false;
+      transcriptBtn.textContent = 'Transcript';
+    }
+  }
+}
+
+function showTranscript(bubble, fileUrl, transcriptText) {
+  const originalContent = bubble.innerHTML;
+  const transcriptHTML = `
+    <div class="transcript-view">
+      <p>${transcriptText}</p>
+      <button class="return-audio-btn">Return to Audio</button>
+    </div>
+  `;
+  bubble.innerHTML = transcriptHTML;
+  const returnBtn = bubble.querySelector('.return-audio-btn');
+  returnBtn.addEventListener('click', () => {
+    bubble.innerHTML = originalContent;
+    const newTranscriptBtn = bubble.querySelector('.transcript-btn');
+    if (newTranscriptBtn) {
+      newTranscriptBtn.addEventListener('click', () => {
+        showTranscript(bubble, fileUrl, transcriptText);
+      });
+    }
+  });
 }
