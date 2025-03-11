@@ -182,10 +182,7 @@ personalPool.query('SELECT NOW()', (err, result) => {
 // ----------------------------
 // Initialize MongoDB (General Database) with Mongoose
 // ----------------------------
-// Generate a random database name (e.g., "openchat-12345")
 const dbName = "openchat";
-
-// Use environment variable or fallback connection string (update with your credentials)
 const generalDbURI = process.env.GENERAL_MONGO_URI ||
   `mongodb+srv://londonjeremie:Narnia2010@cluster0.mtuev.mongodb.net/${dbName}?retryWrites=true&w=majority`;
 
@@ -306,7 +303,7 @@ app.post('/link-database', async (req, res) => {
       `INSERT INTO users (username, password, online)
        VALUES ($1, $2, FALSE)
        ON CONFLICT (username) DO NOTHING`,
-      [userForLink, null]  // Pass null (or a default value) for password if not required.
+      [userForLink, null]  // Pass null for password if not required.
     );
     
     res.json({ message: 'External database linked and user added successfully.' });
@@ -315,8 +312,6 @@ app.post('/link-database', async (req, res) => {
     res.status(500).json({ error: 'Internal server error.' });
   }
 });
-
-  
 
 // ----------------------------
 // Track Users and Their Socket Connections
@@ -337,6 +332,52 @@ webpush.setVapidDetails(
 // ----------------------------
 const server = createServer(app);
 const io = new Server(server);
+
+// ----------------------------
+// New: Load Combined Users for a Socket
+// ----------------------------
+async function loadCombinedUsers(socket) {
+  const currentUser = socket.username;
+  try {
+    // Get local users (excluding the current user)
+    const localResult = await personalPool.query(
+      'SELECT username, online FROM users WHERE username <> $1',
+      [currentUser]
+    );
+    let allUsers = localResult.rows;
+    
+    // Get external database links for the current user
+    const externalLinksResult = await personalPool.query(
+      'SELECT * FROM external_databases WHERE username = $1',
+      [currentUser]
+    );
+    
+    for (const link of externalLinksResult.rows) {
+      const externalPool = new Pool({
+        connectionString: link.database_url,
+        ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+      });
+      const externalUsersResult = await externalPool.query(
+        'SELECT username, online FROM users WHERE username <> $1',
+        [currentUser]
+      );
+      allUsers = allUsers.concat(externalUsersResult.rows);
+    }
+    
+    // Remove duplicate users by username
+    const uniqueUsers = {};
+    allUsers.forEach(u => {
+      uniqueUsers[u.username] = u;
+    });
+    const userList = Object.values(uniqueUsers);
+    
+    // Emit the combined list only to this socket
+    socket.emit('users', userList);
+    console.log(`Users list for ${currentUser} updated:`, userList);
+  } catch (err) {
+    console.error(`Error fetching users list for ${currentUser}:`, err);
+  }
+}
 
 // ----------------------------
 // Socket.IO Events
@@ -450,6 +491,13 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Handle manual load users request from client
+  socket.on('load users', () => {
+    if (socket.username) {
+      loadCombinedUsers(socket);
+    }
+  });
+
   // Handle User Disconnecting
   socket.on('disconnect', () => {
     if (socket.username) {
@@ -458,7 +506,12 @@ io.on('connection', (socket) => {
         if (users[socket.username]) {
           users[socket.username].online = false;
         }
-        updateUsersList();
+        // Update the combined user list for all connected sockets
+        for (const [id, sock] of io.of("/").sockets) {
+          if (sock.username) {
+            loadCombinedUsers(sock);
+          }
+        }
       });
     }
     console.log('A user disconnected');
@@ -500,33 +553,33 @@ io.on('connection', (socket) => {
 // Helper Functions (Outside Socket.IO)
 // ----------------------------
 async function loginUser(socket, username) {
-    // Mark the user as online in the personal PostgreSQL database
-    await personalPool.query('UPDATE users SET online = TRUE WHERE username = $1', [username]);
-    users[username] = { socketId: socket.id, online: true };
-    socket.username = username;
-  
-    // Retrieve the user's authentificator from the MongoDB (general) collection
-    let authentificator = 'Not set';
-    try {
-      const generalUser = await GeneralUser.findOne({ username }).exec();
-      if (generalUser && generalUser.authentificator) {
-        authentificator = generalUser.authentificator;
-      }
-    } catch (error) {
-      console.error('Error retrieving authentificator for', username, error);
+  // Mark the user as online in the personal PostgreSQL database
+  await personalPool.query('UPDATE users SET online = TRUE WHERE username = $1', [username]);
+  users[username] = { socketId: socket.id, online: true };
+  socket.username = username;
+
+  // Retrieve the user's authentificator from the MongoDB (general) collection
+  let authentificator = 'Not set';
+  try {
+    const generalUser = await GeneralUser.findOne({ username }).exec();
+    if (generalUser && generalUser.authentificator) {
+      authentificator = generalUser.authentificator;
     }
-  
-    console.log(`User ${username} logging in with authentificator: ${authentificator}`);
-    // Emit login success with both username and authentificator
-    socket.emit('login success', { username, authentificator });
-    
-    updateUsersList();
-    loadPrivateMessageHistory(username, null, (messages) => {
-      socket.emit('chat history', messages);
-    });
+  } catch (error) {
+    console.error('Error retrieving authentificator for', username, error);
   }
+
+  console.log(`User ${username} logging in with authentificator: ${authentificator}`);
+  // Emit login success with both username and authentificator
+  socket.emit('login success', { username, authentificator });
   
-  
+  // Load combined users list for this socket
+  loadCombinedUsers(socket);
+
+  loadPrivateMessageHistory(username, null, (messages) => {
+    socket.emit('chat history', messages);
+  });
+}
 
 function saveMessage(sender, receiver, message) {
   personalPool.query('INSERT INTO messages (sender, receiver, message) VALUES ($1, $2, $3)', [sender, receiver, message], (err) => {
@@ -579,46 +632,6 @@ function loadPrivateMessageHistory(user1, user2, callback) {
       callback(messages);
     }
   });
-}
-
-async function updateUsersListFor(username) {
-  try {
-    // Get local users excluding the given username.
-    const localResult = await personalPool.query(
-      'SELECT username, online FROM users WHERE username <> $1',
-      [username]
-    );
-    let allUsers = localResult.rows;
-    
-    const externalLinksResult = await personalPool.query(
-      'SELECT * FROM external_databases WHERE username = $1',
-      [username]
-    );
-    
-    for (const link of externalLinksResult.rows) {
-      const externalPool = new Pool({
-        connectionString: link.database_url,
-        ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
-      });
-      const externalUsersResult = await externalPool.query(
-        'SELECT username, online FROM users WHERE username <> $1',
-        [username]
-      );
-      allUsers = allUsers.concat(externalUsersResult.rows);
-    }
-    
-    // Remove duplicates.
-    const uniqueUsers = {};
-    allUsers.forEach(u => {
-      uniqueUsers[u.username] = u;
-    });
-    const userList = Object.values(uniqueUsers);
-    
-    io.emit('users', userList);
-    console.log('Global users list updated for', username, ':', userList);
-  } catch (err) {
-    console.error('Error fetching users list:', err);
-  }
 }
 
 function formatDate(date) {
