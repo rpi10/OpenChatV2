@@ -303,8 +303,9 @@ app.post('/link-database', async (req, res) => {
       `INSERT INTO users (username, password, online)
        VALUES ($1, $2, FALSE)
        ON CONFLICT (username) DO NOTHING`,
-      [userForLink, null]  // Pass null for password if not required.
+      [userForLink, null]
     );
+    externalPool.end();
     
     res.json({ message: 'External database linked and user added successfully.' });
   } catch (err) {
@@ -312,6 +313,32 @@ app.post('/link-database', async (req, res) => {
     res.status(500).json({ error: 'Internal server error.' });
   }
 });
+
+// ----------------------------
+// Helper Function: Save Message to an External Database
+// ----------------------------
+async function saveMessageExternal(database_url, sender, receiver, msg, fileData) {
+  const extPool = new Pool({
+    connectionString: database_url,
+    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+  });
+  try {
+    if (fileData) {
+      const query = `
+        INSERT INTO messages (sender, receiver, message, file_url, file_name, file_type, file_size)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `;
+      const placeholderMessage = 'File attachment';
+      await extPool.query(query, [sender, receiver, placeholderMessage, fileData.fileUrl, fileData.name, fileData.type, fileData.size]);
+    } else {
+      await extPool.query('INSERT INTO messages (sender, receiver, message) VALUES ($1, $2, $3)', [sender, receiver, msg]);
+    }
+  } catch (err) {
+    console.error('Error inserting message into external DB:', err);
+  } finally {
+    extPool.end();
+  }
+}
 
 // ----------------------------
 // Track Users and Their Socket Connections
@@ -362,6 +389,7 @@ async function loadCombinedUsers(socket) {
         [currentUser]
       );
       allUsers = allUsers.concat(externalUsersResult.rows);
+      externalPool.end();
     }
     
     // Remove duplicate users by username
@@ -438,10 +466,10 @@ io.on('connection', (socket) => {
       messageId: generateMessageId()
     };
 
-    // Save text message in the personal database
+    // Save text message in the local personal database
     saveMessage(socket.username, to, msg);
 
-    // Emit message to recipient and sender
+    // Send message to recipient if online
     if (users[to] && users[to].online) {
       io.to(users[to].socketId).emit('chat message', message);
       io.to(users[to].socketId).emit('notification', `New message from ${socket.username}`);
@@ -453,6 +481,31 @@ io.on('connection', (socket) => {
       }
     }
     socket.emit('chat message', message);
+
+    // --- External Message Insertion ---
+    // For the sender's external links (if sender has linked the receiver)
+    (async () => {
+      try {
+        const extLinksSender = await personalPool.query('SELECT * FROM external_databases WHERE username = $1', [socket.username]);
+        for (const link of extLinksSender.rows) {
+          const extUser = await GeneralUser.findOne({ authentificator: link.authentificator }).exec();
+          // If the external link corresponds to the receiver's database
+          if (extUser && extUser.username === to) {
+            await saveMessageExternal(link.database_url, socket.username, to, msg, null);
+          }
+        }
+        // For the receiver's external links (if receiver has linked the sender)
+        const extLinksReceiver = await personalPool.query('SELECT * FROM external_databases WHERE username = $1', [to]);
+        for (const link of extLinksReceiver.rows) {
+          const extUser = await GeneralUser.findOne({ authentificator: link.authentificator }).exec();
+          if (extUser && extUser.username === socket.username) {
+            await saveMessageExternal(link.database_url, socket.username, to, msg, null);
+          }
+        }
+      } catch (err) {
+        console.error('Error saving external message:', err);
+      }
+    })();
   });
 
   // Handle Sending File Messages
@@ -478,6 +531,30 @@ io.on('connection', (socket) => {
       io.to(users[to].socketId).emit('file message', message);
     }
     socket.emit('file message', message);
+
+    // --- External File Message Insertion ---
+    (async () => {
+      try {
+        // For the sender's external links
+        const extLinksSender = await personalPool.query('SELECT * FROM external_databases WHERE username = $1', [socket.username]);
+        for (const link of extLinksSender.rows) {
+          const extUser = await GeneralUser.findOne({ authentificator: link.authentificator }).exec();
+          if (extUser && extUser.username === to) {
+            await saveMessageExternal(link.database_url, socket.username, to, null, { fileUrl, name, type, size });
+          }
+        }
+        // For the receiver's external links
+        const extLinksReceiver = await personalPool.query('SELECT * FROM external_databases WHERE username = $1', [to]);
+        for (const link of extLinksReceiver.rows) {
+          const extUser = await GeneralUser.findOne({ authentificator: link.authentificator }).exec();
+          if (extUser && extUser.username === socket.username) {
+            await saveMessageExternal(link.database_url, socket.username, to, null, { fileUrl, name, type, size });
+          }
+        }
+      } catch (err) {
+        console.error('Error saving external file message:', err);
+      }
+    })();
   });
 
   // Handle Loading Messages Between Users
