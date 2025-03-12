@@ -474,51 +474,139 @@ io.on('connection', (socket) => {
   });
 
   socket.on('chat message', ({ to, msg }) => {
-    if (!socket.username) return;
-    const now = new Date();
-    const message = {
-      from: socket.username,
-      msg,
-      to,
-      timestamp: formatTime(now),
-      dayLabel: formatDayLabel(now),
-      messageId: generateMessageId()
-    };
+  if (!socket.username) return;
+  const now = new Date();
+  const message = {
+    from: socket.username,
+    msg,
+    to,
+    timestamp: formatTime(now),
+    dayLabel: formatDayLabel(now),
+    messageId: generateMessageId()
+  };
 
-    saveMessage(socket.username, to, msg);
-    if (users[to] && users[to].online) {
-      io.to(users[to].socketId).emit('chat message', message);
-      io.to(users[to].socketId).emit('notification', `New message from ${socket.username}`);
-      if (users[to].pushSubscription) {
-        sendPushNotification(JSON.parse(users[to].pushSubscription), {
-          title: 'New Message',
-          body: `You have a new message from ${socket.username}`
-        });
-      }
+  // Save message to local database - message is stored in sender's database (current user's database)
+  saveMessage(socket.username, to, msg);
+  
+  // Send to recipient if they are online
+  if (users[to] && users[to].online) {
+    io.to(users[to].socketId).emit('chat message', message);
+    io.to(users[to].socketId).emit('notification', `New message from ${socket.username}`);
+    if (users[to].pushSubscription) {
+      sendPushNotification(JSON.parse(users[to].pushSubscription), {
+        title: 'New Message',
+        body: `You have a new message from ${socket.username}`
+      });
     }
-    socket.emit('chat message', message);
+  }
+  
+  // Send back to sender for UI update
+  socket.emit('chat message', message);
 
-    (async () => {
-      try {
-        const extLinksSender = await personalPool.query('SELECT * FROM external_databases WHERE username = $1', [socket.username]);
-        for (const link of extLinksSender.rows) {
-          const extUser = await GeneralUser.findOne({ authentificator: link.authentificator }).exec();
-          if (extUser && extUser.username === to) {
-            await saveMessageExternal(link.database_url, socket.username, to, msg, null);
-          }
+  // Cross-database messaging
+  (async () => {
+    try {
+      // First, check if recipient is an external user by checking the external_databases table
+      const recipientExternalResult = await personalPool.query(
+        'SELECT * FROM external_databases WHERE username = $1', 
+        [to]
+      );
+      
+      // If recipient is found in external_databases, send the message to their database
+      if (recipientExternalResult.rows.length > 0) {
+        const recipientDB = recipientExternalResult.rows[0];
+        const recipientPool = new Pool({
+          connectionString: recipientDB.database_url,
+          ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+        });
+        
+        try {
+          // Store the message in the recipient's database
+          await recipientPool.query(
+            'INSERT INTO messages (sender, receiver, message) VALUES ($1, $2, $3)', 
+            [socket.username, to, msg]
+          );
+          console.log(`Message from ${socket.username} to ${to} saved to recipient's database`);
+        } catch (err) {
+          console.error('Error saving message to recipient database:', err);
+        } finally {
+          recipientPool.end();
         }
-        const extLinksReceiver = await personalPool.query('SELECT * FROM external_databases WHERE username = $1', [to]);
-        for (const link of extLinksReceiver.rows) {
-          const extUser = await GeneralUser.findOne({ authentificator: link.authentificator }).exec();
-          if (extUser && extUser.username === socket.username) {
-            await saveMessageExternal(link.database_url, socket.username, to, msg, null);
-          }
-        }
-      } catch (err) {
-        console.error('Error saving external message:', err);
       }
-    })();
-  });
+    } catch (err) {
+      console.error('Error in cross-database messaging:', err);
+    }
+  })();
+});
+
+// Similarly update the file message handler
+socket.on('file message', ({ to, fileUrl, name, type, size, transcription }) => {
+  if (!socket.username) return;
+  const now = new Date();
+  const message = {
+    from: socket.username,
+    fileUrl,
+    name,
+    type,
+    size,
+    to,
+    timestamp: formatTime(now),
+    dayLabel: formatDayLabel(now),
+    messageId: generateMessageId(),
+    recorded: true
+  };
+
+  // Save to sender's database
+  saveFileMessage(socket.username, to, fileUrl, name, type, size);
+  
+  // Send to recipient if online
+  if (users[to] && users[to].online) {
+    io.to(users[to].socketId).emit('file message', message);
+  }
+  
+  // Send back to sender
+  socket.emit('file message', message);
+
+  // Cross-database file message handling
+  (async () => {
+    try {
+      // Check if recipient is external
+      const recipientExternalResult = await personalPool.query(
+        'SELECT * FROM external_databases WHERE username = $1', 
+        [to]
+      );
+      
+      // If recipient is external, save to their database
+      if (recipientExternalResult.rows.length > 0) {
+        const recipientDB = recipientExternalResult.rows[0];
+        const recipientPool = new Pool({
+          connectionString: recipientDB.database_url,
+          ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+        });
+        
+        try {
+          // Store the file message in recipient's database
+          const query = `
+            INSERT INTO messages (sender, receiver, message, file_url, file_name, file_type, file_size)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+          `;
+          const placeholderMessage = 'File attachment';
+          await recipientPool.query(
+            query, 
+            [socket.username, to, placeholderMessage, fileUrl, name, type, size]
+          );
+          console.log(`File message from ${socket.username} to ${to} saved to recipient's database`);
+        } catch (err) {
+          console.error('Error saving file message to recipient database:', err);
+        } finally {
+          recipientPool.end();
+        }
+      }
+    } catch (err) {
+      console.error('Error in cross-database file messaging:', err);
+    }
+  })();
+});
 
   socket.on('file message', ({ to, fileUrl, name, type, size, transcription }) => {
     if (!socket.username) return;
