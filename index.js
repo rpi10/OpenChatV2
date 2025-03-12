@@ -294,7 +294,7 @@ app.post('/link-database', async (req, res) => {
     // 2. Insert into central external_databases for Alice with Bob’s info.
     await personalPool.query(
       'INSERT INTO external_databases (username, authentificator, database_url) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
-      [currentUser, externalAuthenticator, externalGeneralUser.database_url]
+      [externalGeneralUser, externalAuthenticator, externalGeneralUser.database_url]
     );
     
     // 3. Retrieve Alice's general record to get her authentificator and public database URL.
