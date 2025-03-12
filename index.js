@@ -293,44 +293,59 @@ app.post('/link-database', async (req, res) => {
     }
     // targetUser represents Bob, and includes: targetUser.username, targetUser.database_url
     
-    // 2. Insert into the central external_databases table a record for the linking user that holds the target user's info.
-    //    Here, we want to store Bob’s details—so the record’s username will be set to Bob’s username.
+    // 2. Insert Bob into Alice's users table
+    await personalPool.query(
+      `INSERT INTO users (username, password, online)
+       VALUES ($1, $2, FALSE)
+       ON CONFLICT (username) DO NOTHING`,
+      [targetUser.username, null]
+    );
+    
+    // 3. Insert into Alice's external_databases table a record for Bob
     await personalPool.query(
       'INSERT INTO external_databases (username, authentificator, database_url) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
       [targetUser.username, externalAuthenticator, targetUser.database_url]
     );
     
-    // 3. Retrieve the linking user's (Alice’s) general record.
+    // 4. Retrieve Alice's general record
     const linkingUserRecord = await GeneralUser.findOne({ username: currentUser }).exec();
     if (!linkingUserRecord) {
-      console.warn(`Linking user ${currentUser} not found in general DB; reciprocal linking skipped.`);
-    } else {
-      // 4. Connect to the target user's external database (Bob's external DB) using Bob's database URL.
-      const targetExtPool = new Pool({
-        connectionString: targetUser.database_url,
-        ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
-      });
-      // 4a. Insert the linking user's info (Alice) into Bob's users table.
+      return res.status(404).json({ error: 'User not found in general database.' });
+    }
+    
+    // 5. Connect to Bob's database using Bob's database URL
+    const targetExtPool = new Pool({
+      connectionString: targetUser.database_url,
+      ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+    });
+    
+    try {
+      // 6. Insert Alice into Bob's users table
       await targetExtPool.query(
         `INSERT INTO users (username, password, online)
          VALUES ($1, $2, FALSE)
          ON CONFLICT (username) DO NOTHING`,
-        [linkingUserRecord.username, null]
+        [currentUser, null]  // Using current user (Alice) and null password
       );
-      // 4b. Also insert a reciprocal record into Bob's external_databases table with Alice's public info.
+      
+      // 7. Insert Alice's details into Bob's external_databases table
       await targetExtPool.query(
         'INSERT INTO external_databases (username, authentificator, database_url) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
-        [linkingUserRecord.username, linkingUserRecord.authentificator, linkingUserRecord.database_url]
+        [currentUser, linkingUserRecord.authentificator, linkingUserRecord.database_url]
       );
+      
+      res.json({ message: 'External database linked reciprocally successfully.' });
+    } catch (err) {
+      console.error('Error inserting into target database:', err);
+      res.status(500).json({ error: 'Error connecting to target database.' });
+    } finally {
       targetExtPool.end();
     }
-    res.json({ message: 'External database linked reciprocally successfully.' });
   } catch (err) {
     console.error('Error linking database:', err);
     res.status(500).json({ error: 'Internal server error.' });
   }
 });
-
 
 // ----------------------------
 // Helper Function: Save Message to an External Database
