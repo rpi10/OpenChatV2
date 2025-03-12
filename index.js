@@ -272,51 +272,51 @@ async function registerGeneralUser(username, password) {
 // New Endpoint to Link External Databases (Bidirectional Insertion)
 // ----------------------------
 // When a user (e.g. Alice) submits another user's authenticator (e.g. Bob’s),
-//   - Step 1: Insert a record into the central external_databases for Alice with Bob's info.
-//   - Step 2: Also insert a reciprocal record into the central external_databases for Bob using Alice's info.
-//   - Step 3: Connect to Bob's external database (using his database URL) and insert Alice's record into both
-//             the users table and the external_databases table there.
+//   - Step 1: Insert a record into the central external_databases for the current user (Alice)
+//             using her own username as owner and storing Bob's authenticator and Bob's database URL.
+//   - Step 2: Retrieve Alice's general record.
+//   - Step 3: Connect to Bob's external database (using Bob's database URL) and insert a record
+//             so that Bob's external database now has a reciprocal record for Alice.
 app.post('/link-database', async (req, res) => {
   const { externalAuthenticator, username } = req.body;
-  // Use session username if available; otherwise, use the provided username.
+  // Use session username if available; otherwise, use the provided username (this is Alice, the current user)
   const currentUser = req.session.username || username;
   if (!externalAuthenticator || !currentUser) {
     return res.status(400).json({ error: 'Authenticator and username are required.' });
   }
   try {
-    // 1. Lookup the external user's (e.g. Bob’s) general record using his authentificator.
-    const externalGeneralUser = await GeneralUser.findOne({ authentificator: externalAuthenticator }).exec();
-    if (!externalGeneralUser) {
+    // 1. Lookup the external user’s (Bob’s) general record using his authentificator.
+    const linkedUser = await GeneralUser.findOne({ authentificator: externalAuthenticator }).exec();
+    if (!linkedUser) {
       return res.status(404).json({ error: 'Authenticator not found.' });
     }
-    // externalGeneralUser now represents Bob and includes his public database URL and his username.
-
-    // 2. Insert into the central external_databases for the current user (Alice)
-    //    Use Bob’s username here so that in Alice’s collection, the linked account shows Bob.
+    // linkedUser now represents Bob, with his username and public database URL.
+    
+    // 2. Insert into the central external_databases table a record for the linked account.
+    //    We want to store Bob’s info in the record (since Alice is linking Bob).
     await personalPool.query(
       'INSERT INTO external_databases (username, authentificator, database_url) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
-      [externalGeneralUser.username, externalAuthenticator, externalGeneralUser.database_url]
+      [linkedUser.username, externalAuthenticator, linkedUser.database_url]
     );
     
-    // 3. Retrieve current user's (Alice's) general record to get her authentificator and public database URL.
+    // 3. Retrieve the current user’s (Alice’s) general record.
     const currentGeneralUser = await GeneralUser.findOne({ username: currentUser }).exec();
     if (!currentGeneralUser) {
       console.warn(`Current user ${currentUser} not found in general DB; reciprocal linking skipped.`);
     } else {
-      // 4. Connect to Bob’s external database (using Bob’s database URL)
+      // 4. Connect to Bob’s external database (using Bob’s database_url)...
       const extPool = new Pool({
-        connectionString: externalGeneralUser.database_url,
+        connectionString: linkedUser.database_url,
         ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
       });
-      // 4a. Insert a record into Bob’s users table so that Bob’s DB now knows about Alice.
+      // 4a. Insert Alice into Bob’s users table (so Bob’s DB “knows” about Alice).
       await extPool.query(
         `INSERT INTO users (username, password, online)
          VALUES ($1, $2, FALSE)
          ON CONFLICT (username) DO NOTHING`,
         [currentGeneralUser.username, null]
       );
-      // 4b. Also insert into Bob’s external_databases table a reciprocal record
-      //     so that Bob’s DB shows Alice’s external info.
+      // 4b. Also insert a reciprocal record into Bob’s external_databases table with Alice’s public info.
       await extPool.query(
         'INSERT INTO external_databases (username, authentificator, database_url) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
         [currentGeneralUser.username, currentGeneralUser.authentificator, currentGeneralUser.database_url]
@@ -329,8 +329,6 @@ app.post('/link-database', async (req, res) => {
     res.status(500).json({ error: 'Internal server error.' });
   }
 });
-
-
 
 
 // ----------------------------
@@ -385,19 +383,15 @@ const io = new Server(server);
 async function loadCombinedUsers(socket) {
   const currentUser = socket.username;
   try {
-    // Get local users excluding the current user.
     const localResult = await personalPool.query(
       'SELECT username, online FROM users WHERE username <> $1',
       [currentUser]
     );
     let allUsers = localResult.rows;
-    
-    // Get external links for the current user.
     const externalLinksResult = await personalPool.query(
       'SELECT * FROM external_databases WHERE username = $1',
       [currentUser]
     );
-    
     for (const link of externalLinksResult.rows) {
       const externalPool = new Pool({
         connectionString: link.database_url,
@@ -410,12 +404,9 @@ async function loadCombinedUsers(socket) {
       allUsers = allUsers.concat(externalUsersResult.rows);
       externalPool.end();
     }
-    
-    // Remove duplicates.
     const uniqueUsers = {};
     allUsers.forEach(u => { uniqueUsers[u.username] = u; });
     const userList = Object.values(uniqueUsers);
-    
     socket.emit('users', userList);
     console.log(`Users list for ${currentUser} updated:`, userList);
   } catch (err) {
