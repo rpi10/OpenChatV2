@@ -278,56 +278,57 @@ async function registerGeneralUser(username, password) {
 //             the users table and the external_databases table there.
 app.post('/link-database', async (req, res) => {
   const { externalAuthenticator, username } = req.body;
-  // Use session username if available; otherwise, use the provided username
-  const userForLink = req.session.username || username;
-  if (!externalAuthenticator || !userForLink) {
+  // Use the session username if available; otherwise, use the provided username.
+  const currentUser = req.session.username || username;
+  if (!externalAuthenticator || !currentUser) {
     return res.status(400).json({ error: 'Authenticator and username are required.' });
   }
   try {
-    // 1. Lookup Bob's general record using his authentificator
+    // 1. Lookup Bob's general record using his authentificator.
     const externalGeneralUser = await GeneralUser.findOne({ authentificator: externalAuthenticator }).exec();
     if (!externalGeneralUser) {
-      return res.status(404).json({ error: 'Authenticator not found.' });
+      return res.status(404).json({ error: 'External authenticator not found.' });
     }
-    // externalGeneralUser contains Bob’s info including his public database URL.
+    // externalGeneralUser now represents Bob and includes his public database URL.
     
-    // 2. Insert into the central external_databases table for Alice with Bob’s info
+    // 2. Insert into central external_databases for Alice with Bob’s info.
     await personalPool.query(
       'INSERT INTO external_databases (username, authentificator, database_url) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
-      [userForLink, externalAuthenticator, externalGeneralUser.database_url]
+      [currentUser, externalAuthenticator, externalGeneralUser.database_url]
     );
     
-    // 3. Retrieve Alice's general record (to get her authentificator and database URL)
-    const currentGeneralUser = await GeneralUser.findOne({ username: userForLink }).exec();
+    // 3. Retrieve Alice's general record to get her authentificator and public database URL.
+    const currentGeneralUser = await GeneralUser.findOne({ username: currentUser }).exec();
     if (!currentGeneralUser) {
-      console.warn(`Current user ${userForLink} not found in general DB; reciprocal linking skipped.`);
+      console.warn(`Current user ${currentUser} not found in general DB; reciprocal linking skipped.`);
     } else {
-      // 4. Connect to Bob's external database using his database URL
+      // 4. Connect to Bob's external database (using Bob's database URL) and insert Alice's info.
       const extPool = new Pool({
         connectionString: externalGeneralUser.database_url,
         ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
       });
-      // 4a. Insert Alice into Bob's users table if not already present
+      // a) Insert Alice into Bob's users table if not already present.
       await extPool.query(
         `INSERT INTO users (username, password, online)
          VALUES ($1, $2, FALSE)
          ON CONFLICT (username) DO NOTHING`,
-        [userForLink, null]
+        [currentUser, null]
       );
-      // 4b. Also insert a reciprocal record into Bob's external_databases table
-      //     with Alice's public info (her authentificator and database URL)
+      // b) Insert a reciprocal record into Bob's external_databases table with Alice's public info.
       await extPool.query(
         'INSERT INTO external_databases (username, authentificator, database_url) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
-        [userForLink, currentGeneralUser.authentificator, currentGeneralUser.database_url]
+        [currentUser, currentGeneralUser.authentificator, currentGeneralUser.database_url]
       );
       extPool.end();
     }
+    
     res.json({ message: 'External database linked automatically in mirror.' });
   } catch (err) {
     console.error('Error linking database:', err);
     res.status(500).json({ error: 'Internal server error.' });
   }
 });
+
 
 
 // ----------------------------
