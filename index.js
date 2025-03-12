@@ -271,64 +271,68 @@ async function registerGeneralUser(username, password) {
 // ----------------------------
 // New Endpoint to Link External Databases (Bidirectional Linking)
 // ----------------------------
+// When one user links another's authenticator,
+//  - It inserts (currentUser, externalAuthenticator, externalDatabaseURL) into external_databases
+//    (i.e. Alice’s record gets Bob’s DB info)
+//  - It also inserts the reciprocal link: (externalUser.username, currentUser's authentificator, currentUser's database_url)
+//    (i.e. Bob’s record gets Alice’s DB info)
 app.post('/link-database', async (req, res) => {
   const { externalAuthenticator, username } = req.body;
-  // Use session username if available; otherwise, require a username in the request
   const userForLink = req.session.username || username;
   if (!externalAuthenticator || !userForLink) {
     return res.status(400).json({ error: 'Authenticator and username are required.' });
   }
   try {
-    // Look up the external user's general record (e.g. Alice) by their authentificator.
+    // Look up the external user's general record (for the provided authenticator)
     const externalGeneralUser = await GeneralUser.findOne({ authentificator: externalAuthenticator }).exec();
     if (!externalGeneralUser) {
       return res.status(404).json({ error: 'Authenticator not found.' });
     }
     const externalDatabaseURL = externalGeneralUser.database_url;
     
-    // --- Step 1: Link current user (e.g. Bob) to external user's database (Alice's DB) ---
+    // Step 1: For current user (e.g. Alice) add external user's info (Bob's) into her external_databases
     await personalPool.query(
       'INSERT INTO external_databases (username, authentificator, database_url) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
       [userForLink, externalAuthenticator, externalDatabaseURL]
     );
     
-    // Insert the current user into the external database (Alice's DB)
-    const externalPool = new Pool({
+    // Insert current user into external user's (Bob's) database so that Bob has Alice in his users table.
+    const extPool = new Pool({
       connectionString: externalDatabaseURL,
       ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
     });
-    await externalPool.query(
+    await extPool.query(
       `INSERT INTO users (username, password, online)
        VALUES ($1, $2, FALSE)
        ON CONFLICT (username) DO NOTHING`,
       [userForLink, null]
     );
-    externalPool.end();
+    extPool.end();
     
-    // --- Step 2: Reciprocal Linking ---
-    // Look up current user's general record (e.g. Bob)
+    // Step 2: Reciprocal linking
+    // Look up current user's general record (e.g. Alice)
     const currentGeneralUser = await GeneralUser.findOne({ username: userForLink }).exec();
     if (!currentGeneralUser) {
       console.warn(`Current user ${userForLink} not found in general DB, skipping reciprocal linking.`);
     } else {
-      // Add a reciprocal link for the external user (Alice) using current user's (Bob's) details.
+      // Insert reciprocal link for external user (Bob) so that Bob's external_databases gets Alice's DB info.
       await personalPool.query(
         'INSERT INTO external_databases (username, authentificator, database_url) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
         [externalGeneralUser.username, currentGeneralUser.authentificator, currentGeneralUser.database_url]
       );
       
-      // Insert external user's username (Alice) into current user's external database (Bob's DB)
-      const reciprocalPool = new Pool({
+      // Insert external user's username (Bob) into current user's external database (Alice's DB)
+      const recPool = new Pool({
         connectionString: currentGeneralUser.database_url,
         ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
       });
-      await reciprocalPool.query(
+      await recPool.query(
         `INSERT INTO users (username, password, online)
          VALUES ($1, $2, FALSE)
          ON CONFLICT (username) DO NOTHING`,
         [externalGeneralUser.username, null]
       );
-      reciprocalPool.end();
+      recPool.end();
     }
     
     res.json({ message: 'External database linked bidirectionally and users added successfully.' });
@@ -416,11 +420,9 @@ async function loadCombinedUsers(socket) {
       externalPool.end();
     }
     
-    // Remove duplicate users by username
+    // Remove duplicates by username
     const uniqueUsers = {};
-    allUsers.forEach(u => {
-      uniqueUsers[u.username] = u;
-    });
+    allUsers.forEach(u => { uniqueUsers[u.username] = u; });
     const userList = Object.values(uniqueUsers);
     
     // Emit the combined list to this socket
@@ -490,10 +492,10 @@ io.on('connection', (socket) => {
       messageId: generateMessageId()
     };
 
-    // Save message in the local personal database
+    // Save message locally
     saveMessage(socket.username, to, msg);
 
-    // Emit message to recipient if online
+    // Emit to recipient if online
     if (users[to] && users[to].online) {
       io.to(users[to].socketId).emit('chat message', message);
       io.to(users[to].socketId).emit('notification', `New message from ${socket.username}`);
@@ -506,10 +508,10 @@ io.on('connection', (socket) => {
     }
     socket.emit('chat message', message);
 
-    // --- External Message Insertion ---
+    // External message insertion: check both sender’s and receiver’s external links
     (async () => {
       try {
-        // Check sender's external links: if sender has linked the receiver's DB
+        // For sender's external links (if sender has linked receiver's DB)
         const extLinksSender = await personalPool.query('SELECT * FROM external_databases WHERE username = $1', [socket.username]);
         for (const link of extLinksSender.rows) {
           const extUser = await GeneralUser.findOne({ authentificator: link.authentificator }).exec();
@@ -517,7 +519,7 @@ io.on('connection', (socket) => {
             await saveMessageExternal(link.database_url, socket.username, to, msg, null);
           }
         }
-        // Check receiver's external links: if receiver has linked the sender's DB
+        // For receiver's external links (if receiver has linked sender's DB)
         const extLinksReceiver = await personalPool.query('SELECT * FROM external_databases WHERE username = $1', [to]);
         for (const link of extLinksReceiver.rows) {
           const extUser = await GeneralUser.findOne({ authentificator: link.authentificator }).exec();
@@ -555,10 +557,9 @@ io.on('connection', (socket) => {
     }
     socket.emit('file message', message);
 
-    // --- External File Message Insertion ---
+    // External file message insertion
     (async () => {
       try {
-        // Check sender's external links
         const extLinksSender = await personalPool.query('SELECT * FROM external_databases WHERE username = $1', [socket.username]);
         for (const link of extLinksSender.rows) {
           const extUser = await GeneralUser.findOne({ authentificator: link.authentificator }).exec();
@@ -566,7 +567,6 @@ io.on('connection', (socket) => {
             await saveMessageExternal(link.database_url, socket.username, to, null, { fileUrl, name, type, size });
           }
         }
-        // Check receiver's external links
         const extLinksReceiver = await personalPool.query('SELECT * FROM external_databases WHERE username = $1', [to]);
         for (const link of extLinksReceiver.rows) {
           const extUser = await GeneralUser.findOne({ authentificator: link.authentificator }).exec();
@@ -591,7 +591,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Handle manual load users request from client
+  // Manual load users request
   socket.on('load users', () => {
     if (socket.username) {
       loadCombinedUsers(socket);
@@ -606,7 +606,7 @@ io.on('connection', (socket) => {
         if (users[socket.username]) {
           users[socket.username].online = false;
         }
-        // Refresh combined user lists for all connected sockets
+        // Refresh user lists for all connected sockets
         for (const [id, sock] of io.of("/").sockets) {
           if (sock.username) {
             loadCombinedUsers(sock);
@@ -617,7 +617,7 @@ io.on('connection', (socket) => {
     console.log('A user disconnected');
   });
 
-  // Handle New Password Setup for Users Without a Password
+  // Handle New Password Setup
   socket.on('setup password', async ({ username, password }) => {
     try {
       const hashedPassword = await bcrypt.hash(password, 10);
@@ -653,12 +653,10 @@ io.on('connection', (socket) => {
 // Helper Functions (Outside Socket.IO)
 // ----------------------------
 async function loginUser(socket, username) {
-  // Mark the user as online in the local personal database
   await personalPool.query('UPDATE users SET online = TRUE WHERE username = $1', [username]);
   users[username] = { socketId: socket.id, online: true };
   socket.username = username;
 
-  // Retrieve the user's authentificator from the MongoDB (general) collection
   let authentificator = 'Not set';
   try {
     const generalUser = await GeneralUser.findOne({ username }).exec();
