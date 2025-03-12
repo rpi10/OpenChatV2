@@ -416,7 +416,7 @@ async function loadCombinedUsers(socket) {
       externalPool.end();
     }
     
-    // Remove duplicates by username
+    // Remove duplicate users by username
     const uniqueUsers = {};
     allUsers.forEach(u => {
       uniqueUsers[u.username] = u;
@@ -558,7 +558,7 @@ io.on('connection', (socket) => {
     // --- External File Message Insertion ---
     (async () => {
       try {
-        // Sender's external links
+        // Check sender's external links
         const extLinksSender = await personalPool.query('SELECT * FROM external_databases WHERE username = $1', [socket.username]);
         for (const link of extLinksSender.rows) {
           const extUser = await GeneralUser.findOne({ authentificator: link.authentificator }).exec();
@@ -566,7 +566,7 @@ io.on('connection', (socket) => {
             await saveMessageExternal(link.database_url, socket.username, to, null, { fileUrl, name, type, size });
           }
         }
-        // Receiver's external links
+        // Check receiver's external links
         const extLinksReceiver = await personalPool.query('SELECT * FROM external_databases WHERE username = $1', [to]);
         for (const link of extLinksReceiver.rows) {
           const extUser = await GeneralUser.findOne({ authentificator: link.authentificator }).exec();
@@ -653,7 +653,7 @@ io.on('connection', (socket) => {
 // Helper Functions (Outside Socket.IO)
 // ----------------------------
 async function loginUser(socket, username) {
-  // Mark the user as online in the personal PostgreSQL database
+  // Mark the user as online in the local personal database
   await personalPool.query('UPDATE users SET online = TRUE WHERE username = $1', [username]);
   users[username] = { socketId: socket.id, online: true };
   socket.username = username;
