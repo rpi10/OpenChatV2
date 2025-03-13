@@ -423,9 +423,19 @@ body {
   padding: 25px;
   border-radius: 8px;
   width: 400px;
+  margin: auto;
+  align-items: center;
   max-width: 90%;
   box-shadow: 0 4px 10px rgba(0, 0, 0, 0.2);
 }
+
+.modal-content {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+
 
 .modal-content h3 {
   color: #128C7E;
@@ -609,7 +619,7 @@ body {
   padding: 0 20px;
 }
 
-.close-image {
+.close-modal {
   color: white;
   font-size: 35px;
   background: none;
@@ -617,7 +627,7 @@ body {
   cursor: pointer;
 }
 
-.download-image {
+.download-modal {
   background: white;
   color: #128C7E;
   padding: 8px 15px;
