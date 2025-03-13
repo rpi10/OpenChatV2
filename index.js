@@ -251,23 +251,53 @@ function generateAuthenticator() {
 }
 
 async function registerGeneralUser(username, password) {
-  const authentificator = generateAuthenticator();
-  const databaseURL = process.env.DATABASE_URL; // personal DB URL
+  // Generate a unique authenticator
+  let authentificator;
+  let isUnique = false;
+  
+  // Keep generating until we have a unique one
+  while (!isUnique) {
+    authentificator = generateAuthenticator();
+    const existing = await GeneralUser.findOne({ authentificator }).exec();
+    if (!existing) {
+      isUnique = true;
+    }
+  }
+  
+  const databaseURL = process.env.DATABASE_URL;
+  
   try {
+    // Check if user already exists
+    const existingUser = await GeneralUser.findOne({ username }).exec();
+    if (existingUser) {
+      throw new Error('Username already exists in general database');
+    }
+    
+    // Create new user
     const newGeneralUser = new GeneralUser({
       authentificator,
       username,
-      password,
+      password, // This should be already hashed
       database_url: databaseURL
     });
+    
     await newGeneralUser.save();
     return authentificator;
   } catch (err) {
     console.error('Error registering general user:', err);
+    
+    // Better error handling for MongoDB specific errors
+    if (err.code === 11000) { // Duplicate key error
+      if (err.keyPattern && err.keyPattern.username) {
+        throw new Error('Username already exists in general database');
+      } else if (err.keyPattern && err.keyPattern.authentificator) {
+        throw new Error('Authentication key collision. Please try again.');
+      }
+    }
+    
     throw err;
   }
 }
-
 // ----------------------------
 // New Endpoint to Link External Databases (Bidirectional Insertion)
 // ----------------------------
@@ -277,73 +307,112 @@ async function registerGeneralUser(username, password) {
 //   - Step 2: Retrieve Alice's general record.
 //   - Step 3: Connect to Bob's external database (using Bob's database URL) and insert a record
 //             so that Bob's external database now has a reciprocal record for Alice.
+// ----------------------------
+// New Endpoint to Link External Databases (Bidirectional Insertion)
+// ----------------------------
 app.post('/link-database', async (req, res) => {
   // The linking user (e.g. Alice) sends in her own username and the authenticator of the target user (e.g. Bob)
   const { externalAuthenticator, username } = req.body;
   // currentUser is the linking user (Alice)
   const currentUser = req.session.username || username;
+  
   if (!externalAuthenticator || !currentUser) {
     return res.status(400).json({ error: 'Authenticator and username are required.' });
   }
+  
   try {
+    // 0. First, check if the authenticator belongs to the current user to prevent self-linking
+    const currentUserRecord = await GeneralUser.findOne({ username: currentUser }).exec();
+    if (!currentUserRecord) {
+      return res.status(404).json({ error: 'Current user not found in general database.' });
+    }
+    
+    if (currentUserRecord.authentificator === externalAuthenticator) {
+      return res.status(400).json({ error: 'Cannot link to your own database.' });
+    }
+    
     // 1. Look up the target user (Bob) by his authenticator.
     const targetUser = await GeneralUser.findOne({ authentificator: externalAuthenticator }).exec();
     if (!targetUser) {
       return res.status(404).json({ error: 'Authenticator not found.' });
     }
-    // targetUser represents Bob, and includes: targetUser.username, targetUser.database_url
     
-    // 2. Insert Bob into Alice's users table
-    await personalPool.query(
-      `INSERT INTO users (username, password, online)
-       VALUES ($1, $2, FALSE)
-       ON CONFLICT (username) DO NOTHING`,
-      [targetUser.username, null]
+    // Check if the databases are already linked
+    const existingLink = await personalPool.query(
+      'SELECT * FROM external_databases WHERE username = $1 AND authentificator = $2',
+      [targetUser.username, externalAuthenticator]
     );
     
-    // 3. Insert into Alice's external_databases table a record for Bob
-    await personalPool.query(
-      'INSERT INTO external_databases (username, authentificator, database_url) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
-      [targetUser.username, externalAuthenticator, targetUser.database_url]
-    );
-    
-    // 4. Retrieve Alice's general record
-    const linkingUserRecord = await GeneralUser.findOne({ username: currentUser }).exec();
-    if (!linkingUserRecord) {
-      return res.status(404).json({ error: 'User not found in general database.' });
+    if (existingLink.rows.length > 0) {
+      return res.status(400).json({ error: 'Databases are already linked.' });
     }
     
-    // 5. Connect to Bob's database using Bob's database URL
-    const targetExtPool = new Pool({
-      connectionString: targetUser.database_url,
-      ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
-    });
-    
+    // 2. Insert Bob into Alice's users table
     try {
+      await personalPool.query(
+        `INSERT INTO users (username, password, online)
+         VALUES ($1, $2, FALSE)
+         ON CONFLICT (username) DO NOTHING`,
+        [targetUser.username, null]
+      );
+    } catch (err) {
+      console.error('Error inserting user into local database:', err);
+      return res.status(500).json({ error: 'Error inserting user into local database.' });
+    }
+    
+    // 3. Insert into Alice's external_databases table a record for Bob
+    try {
+      await personalPool.query(
+        'INSERT INTO external_databases (username, authentificator, database_url) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
+        [targetUser.username, externalAuthenticator, targetUser.database_url]
+      );
+    } catch (err) {
+      console.error('Error inserting external database record:', err);
+      return res.status(500).json({ error: 'Error inserting external database record.' });
+    }
+    
+    // 4. Connect to Bob's database using Bob's database URL
+    let targetExtPool = null;
+    try {
+      targetExtPool = new Pool({
+        connectionString: targetUser.database_url,
+        ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+      });
+      
+      // 5. Test connection to target database
+      await targetExtPool.query('SELECT NOW()');
+      
       // 6. Insert Alice into Bob's users table
       await targetExtPool.query(
         `INSERT INTO users (username, password, online)
          VALUES ($1, $2, FALSE)
          ON CONFLICT (username) DO NOTHING`,
-        [currentUser, null]  // Using current user (Alice) and null password
+        [currentUser, null]
       );
       
       // 7. Insert Alice's details into Bob's external_databases table
       await targetExtPool.query(
         'INSERT INTO external_databases (username, authentificator, database_url) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
-        [currentUser, linkingUserRecord.authentificator, linkingUserRecord.database_url]
+        [currentUser, currentUserRecord.authentificator, currentUserRecord.database_url]
       );
       
-      res.json({ message: 'External database linked reciprocally successfully.' });
+      res.json({ 
+        message: 'External database linked successfully.',
+        linkedUser: targetUser.username
+      });
     } catch (err) {
-      console.error('Error inserting into target database:', err);
-      res.status(500).json({ error: 'Error connecting to target database.' });
+      console.error('Error connecting to or inserting into target database:', err);
+      return res.status(500).json({ 
+        error: 'Error connecting to target database. Please verify the authenticator is correct.'
+      });
     } finally {
-      targetExtPool.end();
+      if (targetExtPool) {
+        targetExtPool.end();
+      }
     }
   } catch (err) {
     console.error('Error linking database:', err);
-    res.status(500).json({ error: 'Internal server error.' });
+    res.status(500).json({ error: 'Internal server error: ' + err.message });
   }
 });
 
@@ -461,17 +530,62 @@ io.on('connection', (socket) => {
   });
 
   socket.on('signup', async ({ username, password }) => {
-    try {
-      const hashedPassword = await bcrypt.hash(password, 10);
-      await personalPool.query('INSERT INTO users (username, password, online) VALUES ($1, $2, TRUE)', [username, hashedPassword]);
-      const generalAuthenticator = await registerGeneralUser(username, hashedPassword);
-      console.log(`User ${username} registered in general database with authentificator: ${generalAuthenticator}`);
-      await loginUser(socket, username);
-    } catch (err) {
-      console.error('Error during signup:', err);
-      socket.emit('signup failed', 'Signup failed. User may already exist.');
+  try {
+    // Check if username is valid
+    if (!username || username.trim() === '') {
+      return socket.emit('signup failed', 'Username cannot be empty.');
     }
-  });
+    
+    // Check if username contains invalid characters
+    if (!/^[a-zA-Z0-9_]+$/.test(username)) {
+      return socket.emit('signup failed', 'Username can only contain letters, numbers, and underscores.');
+    }
+    
+    // Check if password is strong enough
+    if (!password || password.length < 6) {
+      return socket.emit('signup failed', 'Password must be at least 6 characters long.');
+    }
+    
+    // Check if user exists in the general database
+    const existingGeneralUser = await GeneralUser.findOne({ username }).exec();
+    if (existingGeneralUser) {
+      return socket.emit('signup failed', 'Username already exists in the system.');
+    }
+    
+    // Check if user exists in personal database
+    const existingLocalUser = await personalPool.query(
+      'SELECT * FROM users WHERE username = $1',
+      [username]
+    );
+    
+    if (existingLocalUser.rows.length > 0) {
+      return socket.emit('signup failed', 'Username already exists.');
+    }
+    
+    // Create the user
+    const hashedPassword = await bcrypt.hash(password, 10);
+    
+    // First, insert into personal database
+    await personalPool.query(
+      'INSERT INTO users (username, password, online) VALUES ($1, $2, TRUE)', 
+      [username, hashedPassword]
+    );
+    
+    // Then, register in general database
+    const generalAuthenticator = await registerGeneralUser(username, hashedPassword);
+    
+    console.log(`User ${username} registered with authenticator: ${generalAuthenticator}`);
+    
+    await loginUser(socket, username);
+    
+    // Emit the authenticator to the client
+    socket.emit('authenticator', generalAuthenticator);
+    
+  } catch (err) {
+    console.error('Error during signup:', err);
+    socket.emit('signup failed', 'Signup failed. Please try again later.');
+  }
+});
 
   socket.on('chat message', ({ to, msg }) => {
   if (!socket.username) return;
