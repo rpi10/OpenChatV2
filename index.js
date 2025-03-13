@@ -691,13 +691,12 @@ socket.on('file message', ({ to, fileUrl, name, type, size, transcription }) => 
   // Send to recipient if online
   if (users[to] && users[to].online) {
     io.to(users[to].socketId).emit('file message', message);
-    io.to(users[to].socketId).emit('notification', `New file from ${socket.username}`);
   }
   
   // Send back to sender ONLY ONCE
   socket.emit('file message', message);
 
-  // Cross-database file message handling
+  // Cross-database file message handling - DON'T emit a second time to sender
   (async () => {
     try {
       // Check if recipient is external
@@ -706,18 +705,17 @@ socket.on('file message', ({ to, fileUrl, name, type, size, transcription }) => 
         [to]
       );
       
-      // If recipient is external, save to their database - BUT DON'T EMIT TO SENDER AGAIN
+      // If recipient is external, save to their database
       if (recipientExternalResult.rows.length > 0) {
         const recipientDB = recipientExternalResult.rows[0];
-        // Use the helper function that doesn't emit events
-        await saveMessageToExternalDB(recipientDB.database_url, socket.username, to, null, { fileUrl, name, type, size });
+        saveMessageToExternalDB(recipientDB.database_url, socket.username, to, null, { fileUrl, name, type, size });
       }
     } catch (err) {
       console.error('Error in cross-database file messaging:', err);
     }
   })();
 });
-  
+
 // Helper function to save messages to external DBs without duplicating events
 async function saveMessageToExternalDB(databaseUrl, sender, receiver, msg, fileData) {
   const extPool = new Pool({
@@ -852,53 +850,30 @@ async function saveMessageToExternalDB(databaseUrl, sender, receiver, msg, fileD
 // ----------------------------
 // Helper Functions (Outside Socket.IO)
 // ----------------------------
-socket.on('login', async ({ username, password }) => {
-  try {
-    // First check the personal (PostgreSQL) database
-    const userQuery = await personalPool.query('SELECT * FROM users WHERE username = $1', [username]);
-    const localUser = userQuery.rows[0];
-    
-    if (localUser) {
-      // User exists in local database
-      if (!localUser.password) {
-        socket.emit('prompt signup', 'User exists but no password set. Would you like to set a password?');
-      } else {
-        const match = await bcrypt.compare(password, localUser.password);
-        if (match) {
-          await loginUser(socket, username);
-        } else {
-          socket.emit('login failed', 'Invalid password.');
-        }
-      }
-    } else {
-      // User not found in local DB, check the general (MongoDB) database
-      const generalUser = await GeneralUser.findOne({ username }).exec();
-      
-      if (generalUser) {
-        // User exists in general database but not in local database
-        // Create user in local database with the same password
-        try {
-          const hashedPassword = generalUser.password; // Password should already be hashed
-          await personalPool.query(
-            'INSERT INTO users (username, password, online) VALUES ($1, $2, TRUE)', 
-            [username, hashedPassword]
-          );
-          await loginUser(socket, username);
-        } catch (err) {
-          console.error('Error creating local user from general DB:', err);
-          socket.emit('login failed', 'Error syncing user from central database.');
-        }
-      } else {
-        // User not found in either database
-        socket.emit('prompt signup', 'User not found. Would you like to sign up?');
-      }
-    }
-  } catch (err) {
-    console.error('Error during login:', err);
-    socket.emit('login failed', 'An error occurred during login.');
-  }
-});
+async function loginUser(socket, username) {
+  await personalPool.query('UPDATE users SET online = TRUE WHERE username = $1', [username]);
+  users[username] = { socketId: socket.id, online: true };
+  socket.username = username;
 
+  let authentificator = 'Not set';
+  try {
+    const generalUser = await GeneralUser.findOne({ username }).exec();
+    if (generalUser && generalUser.authentificator) {
+      authentificator = generalUser.authentificator;
+    }
+  } catch (error) {
+    console.error('Error retrieving authentificator for', username, error);
+  }
+
+  console.log(`User ${username} logging in with authentificator: ${authentificator}`);
+  socket.emit('login success', { username, authentificator });
+  
+  loadCombinedUsers(socket);
+  
+  loadPrivateMessageHistory(username, null, (messages) => {
+    socket.emit('chat history', messages);
+  });
+}
 
 function saveMessage(sender, receiver, message) {
   personalPool.query('INSERT INTO messages (sender, receiver, message) VALUES ($1, $2, $3)', [sender, receiver, message], (err) => {
