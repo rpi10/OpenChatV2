@@ -170,7 +170,7 @@ const personalPool = new Pool({
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
 });
 
-personalPool.query('SELECT NOW()', (err, result) => {
+personalPool.query('SELECT NOW()', (err) => {
   if (err) {
     console.error('Error connecting to the personal database:', err);
   } else {
@@ -278,22 +278,27 @@ app.post('/link-database', async (req, res) => {
     return res.status(400).json({ error: 'Authenticator and username are required.' });
   }
   try {
+    // Look up the external user's general record using the provided authenticator.
     const externalGeneralUser = await GeneralUser.findOne({ authentificator: externalAuthenticator }).exec();
     if (!externalGeneralUser) {
       return res.status(404).json({ error: 'Authenticator not found.' });
     }
+    // Insert external record into current user’s external_databases.
     await personalPool.query(
       'INSERT INTO external_databases (username, authentificator, database_url) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
       [userForLink, externalAuthenticator, externalGeneralUser.database_url]
     );
+    // Retrieve current user's general record.
     const currentGeneralUser = await GeneralUser.findOne({ username: userForLink }).exec();
     if (!currentGeneralUser) {
       console.warn(`Current user ${userForLink} not found in general DB; reciprocal linking skipped.`);
     } else {
+      // Insert reciprocal record for the external user.
       await personalPool.query(
         'INSERT INTO external_databases (username, authentificator, database_url) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
         [externalGeneralUser.username, currentGeneralUser.authentificator, currentGeneralUser.database_url]
       );
+      // Connect to the external database and add current user.
       const extPool = new Pool({
         connectionString: externalGeneralUser.database_url,
         ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
@@ -366,7 +371,7 @@ const server = createServer(app);
 const io = new Server(server);
 
 // ----------------------------
-// Helper Functions for Formatting and Message Handling
+// Helper Functions: Formatting and Message Handling
 // ----------------------------
 function formatDate(date) {
   const options = { year: '2-digit', month: '2-digit', day: '2-digit' };
@@ -457,7 +462,7 @@ function loadPrivateMessageHistory(user1, user2, callback) {
 io.on('connection', (socket) => {
   console.log('A user connected');
 
-  // Updated Login Handler: Check personal DB first, then general DB if needed
+  // LOGIN: Check personal DB first then general DB if needed.
   socket.on('login', async ({ username, password }) => {
     try {
       const userQuery = await personalPool.query('SELECT * FROM users WHERE username = $1', [username]);
@@ -475,11 +480,11 @@ io.on('connection', (socket) => {
           }
         }
       } else {
-        // Check general (MongoDB) database
+        // User not in personal DB; check the general DB
         const generalUser = await GeneralUser.findOne({ username }).exec();
         if (generalUser) {
           try {
-            const hashedPassword = generalUser.password; // Already hashed
+            const hashedPassword = generalUser.password; // already hashed
             await personalPool.query(
               'INSERT INTO users (username, password, online) VALUES ($1, $2, TRUE)', 
               [username, hashedPassword]
@@ -499,7 +504,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Signup Handler
+  // SIGNUP
   socket.on('signup', async ({ username, password }) => {
     try {
       const hashedPassword = await bcrypt.hash(password, 10);
@@ -513,7 +518,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Chat Message Handler
+  // CHAT MESSAGE
   socket.on('chat message', ({ to, msg }) => {
     if (!socket.username) return;
     const now = new Date();
@@ -561,7 +566,7 @@ io.on('connection', (socket) => {
     })();
   });
 
-  // File Message Handler (single instance to prevent duplicate messages)
+  // FILE MESSAGE (Single handler to prevent duplicate sender messages)
   socket.on('file message', ({ to, fileUrl, name, type, size, transcription }) => {
     if (!socket.username) return;
     const now = new Date();
@@ -606,7 +611,7 @@ io.on('connection', (socket) => {
     })();
   });
 
-  // Load Messages Event
+  // LOAD MESSAGES
   socket.on('load messages', ({ user }) => {
     if (socket.username && user) {
       loadPrivateMessageHistory(socket.username, user, (messages) => {
@@ -617,14 +622,14 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Load Users Event
+  // LOAD USERS
   socket.on('load users', () => {
     if (socket.username) {
       loadCombinedUsers(socket);
     }
   });
 
-  // Setup Password Event
+  // SETUP PASSWORD
   socket.on('setup password', async ({ username, password }) => {
     try {
       const hashedPassword = await bcrypt.hash(password, 10);
@@ -637,7 +642,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Subscribe for Push Notifications
+  // SUBSCRIBE FOR PUSH NOTIFICATIONS
   socket.on('subscribe', async (subscription) => {
     try {
       await personalPool.query('UPDATE users SET push_subscription = $1 WHERE username = $2', [JSON.stringify(subscription), socket.username]);
@@ -647,7 +652,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Disconnect Event
+  // DISCONNECT
   socket.on('disconnect', () => {
     if (socket.username) {
       personalPool.query('UPDATE users SET online = FALSE WHERE username = $1', [socket.username], (err) => {
@@ -655,6 +660,7 @@ io.on('connection', (socket) => {
         if (users[socket.username]) {
           users[socket.username].online = false;
         }
+        // Update all connected clients with the new users list and status.
         for (const [id, sock] of io.of("/").sockets) {
           if (sock.username) {
             loadCombinedUsers(sock);
@@ -697,7 +703,7 @@ async function loginUser(socket, username) {
   broadcastUserStatusUpdate(username, true);
 }
 
-// Function to Broadcast User Status Updates
+// Broadcast User Status to all connected sockets.
 function broadcastUserStatusUpdate(username, online) {
   for (const [id, sock] of io.of("/").sockets) {
     if (sock.username) {
@@ -706,7 +712,7 @@ function broadcastUserStatusUpdate(username, online) {
   }
 }
 
-// Function to Load Combined Users (Local + External)
+// Load combined users from the local and external databases.
 async function loadCombinedUsers(socket) {
   const currentUser = socket.username;
   try {
@@ -734,7 +740,7 @@ async function loadCombinedUsers(socket) {
       externalPool.end();
     }
     
-    // Remove duplicates
+    // Remove duplicates.
     const uniqueUsers = {};
     allUsers.forEach(u => { uniqueUsers[u.username] = u; });
     const userList = Object.values(uniqueUsers);
@@ -746,7 +752,7 @@ async function loadCombinedUsers(socket) {
   }
 }
 
-// Function to Send Push Notifications
+// Send a push notification.
 async function sendPushNotification(subscription, message) {
   try {
     await webpush.sendNotification(subscription, JSON.stringify(message));
@@ -763,31 +769,25 @@ server.listen(port, () => {
 });
 
 /*
-  CLIENT-SIDE CODE:
-  
-  To ensure real-time chat updates, add these event listeners in your client-side JavaScript:
+  CLIENT-SIDE CODE SNIPPET:
+
+  To update chats in real time, add these event listeners in your client-side JavaScript:
 
   socket.on('chat message', (message) => {
-    // Add the new message to chat history without reloading everything
     addMessageToChat(message);
-    // Update the last message in the user's list for this conversation
     updateLastMessageInUsersList(message.from, message.msg);
-    // If this conversation is not currently active, mark it as unread
     if (currentChatPartner !== message.from && message.from !== myUsername) {
       markConversationUnread(message.from);
     }
   });
   
   socket.on('file message', (message) => {
-    // Add the new file message to chat history without reloading everything
     addFileMessageToChat(message);
-    // Update the last message in the user's list for this conversation
     updateLastMessageInUsersList(message.from, "File attachment");
-    // If this conversation is not currently active, mark it as unread
     if (currentChatPartner !== message.from && message.from !== myUsername) {
       markConversationUnread(message.from);
     }
   });
-  
-  Make sure functions like addMessageToChat, addFileMessageToChat, updateLastMessageInUsersList, and markConversationUnread are implemented.
+
+  Ensure that functions such as addMessageToChat, addFileMessageToChat, updateLastMessageInUsersList, and markConversationUnread are defined in your client code.
 */
