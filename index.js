@@ -251,46 +251,52 @@ function generateAuthenticator() {
 }
 
 async function registerGeneralUser(username, password) {
-  // Generate a unique authenticator
-  let authentificator;
-  let isUnique = false;
-  
-  // Keep generating until we have a unique one
-  while (!isUnique) {
-    authentificator = generateAuthenticator();
-    const existing = await GeneralUser.findOne({ authentificator }).exec();
-    if (!existing) {
-      isUnique = true;
+  // Generate unique authenticator
+  const generateUniqueAuthenticator = async () => {
+    let attempts = 0;
+    const maxAttempts = 10;
+    
+    while (attempts < maxAttempts) {
+      const code = generateAuthenticator();
+      const existing = await GeneralUser.findOne({ authentificator: code }).exec();
+      if (!existing) {
+        return code;
+      }
+      attempts++;
     }
-  }
+    throw new Error('Could not generate unique authenticator after multiple attempts');
+  };
   
   const databaseURL = process.env.DATABASE_URL;
   
   try {
-    // Check if user already exists
+    // Double-check if username already exists
     const existingUser = await GeneralUser.findOne({ username }).exec();
     if (existingUser) {
-      throw new Error('Username already exists in general database');
+      throw new Error(`Username '${username}' already exists in general database`);
     }
     
-    // Create new user
+    // Generate unique authenticator
+    const authentificator = await generateUniqueAuthenticator();
+    
+    // Create and save the user
     const newGeneralUser = new GeneralUser({
       authentificator,
       username,
-      password, // This should be already hashed
+      password, // Should already be hashed
       database_url: databaseURL
     });
     
     await newGeneralUser.save();
     return authentificator;
   } catch (err) {
-    console.error('Error registering general user:', err);
+    console.error(`Error registering user '${username}' in general database:`, err);
     
-    // Better error handling for MongoDB specific errors
-    if (err.code === 11000) { // Duplicate key error
-      if (err.keyPattern && err.keyPattern.username) {
-        throw new Error('Username already exists in general database');
-      } else if (err.keyPattern && err.keyPattern.authentificator) {
+    // Better error handling
+    if (err.code === 11000) { // MongoDB duplicate key error
+      if (err.keyPattern?.username) {
+        throw new Error(`Username '${username}' already exists in general database`);
+      } else if (err.keyPattern?.authentificator) {
         throw new Error('Authentication key collision. Please try again.');
       }
     }
@@ -531,62 +537,71 @@ io.on('connection', (socket) => {
 
   socket.on('signup', async ({ username, password }) => {
   try {
-    // Check if username is valid
+    // Validate inputs
     if (!username || username.trim() === '') {
       return socket.emit('signup failed', 'Username cannot be empty.');
     }
     
-    // Check if username contains invalid characters
-    if (!/^[a-zA-Z0-9_]+$/.test(username)) {
-      return socket.emit('signup failed', 'Username can only contain letters, numbers, and underscores.');
-    }
-    
-    // Check if password is strong enough
     if (!password || password.length < 6) {
       return socket.emit('signup failed', 'Password must be at least 6 characters long.');
     }
     
-    // Check if user exists in the general database
+    // FIRST: Check if user exists in the general database (MongoDB)
+    console.log(`Checking if username '${username}' exists in general database...`);
     const existingGeneralUser = await GeneralUser.findOne({ username }).exec();
+    
     if (existingGeneralUser) {
-      return socket.emit('signup failed', 'Username already exists in the system.');
+      console.log(`Username '${username}' already exists in general database.`);
+      return socket.emit('signup failed', 'Username already exists in our system.');
     }
     
-    // Check if user exists in personal database
-    const existingLocalUser = await personalPool.query(
-      'SELECT * FROM users WHERE username = $1',
-      [username]
-    );
+    // THEN: Check if user exists in personal database (PostgreSQL)
+    console.log(`Checking if username '${username}' exists in personal database...`);
+    const userQuery = await personalPool.query('SELECT * FROM users WHERE username = $1', [username]);
     
-    if (existingLocalUser.rows.length > 0) {
-      return socket.emit('signup failed', 'Username already exists.');
+    if (userQuery.rows.length > 0) {
+      console.log(`Username '${username}' already exists in personal database.`);
+      return socket.emit('signup failed', 'Username already exists in local database.');
     }
     
-    // Create the user
+    console.log(`Username '${username}' is available. Creating account...`);
+    
+    // Hash password and create user
     const hashedPassword = await bcrypt.hash(password, 10);
     
-    // First, insert into personal database
-    await personalPool.query(
-      'INSERT INTO users (username, password, online) VALUES ($1, $2, TRUE)', 
-      [username, hashedPassword]
-    );
-    
-    // Then, register in general database
-    const generalAuthenticator = await registerGeneralUser(username, hashedPassword);
-    
-    console.log(`User ${username} registered with authenticator: ${generalAuthenticator}`);
-    
-    await loginUser(socket, username);
-    
-    // Emit the authenticator to the client
-    socket.emit('authenticator', generalAuthenticator);
+    // Insert user into both databases in correct order
+    try {
+      // First register in general database to get authenticator
+      const generalAuthenticator = await registerGeneralUser(username, hashedPassword);
+      console.log(`User ${username} registered in general database with authenticator: ${generalAuthenticator}`);
+      
+      // Then insert into personal database
+      await personalPool.query(
+        'INSERT INTO users (username, password, online) VALUES ($1, $2, TRUE)', 
+        [username, hashedPassword]
+      );
+      
+      await loginUser(socket, username);
+    } catch (err) {
+      console.error(`Error during account creation for ${username}:`, err);
+      
+      // If the general DB insertion succeeded but the personal DB failed,
+      // we should roll back the general DB entry
+      try {
+        await GeneralUser.deleteOne({ username });
+        console.log(`Rolled back general DB entry for ${username} due to error.`);
+      } catch (rollbackErr) {
+        console.error(`Failed to roll back general DB entry for ${username}:`, rollbackErr);
+      }
+      
+      return socket.emit('signup failed', 'Error creating account. Please try again.');
+    }
     
   } catch (err) {
     console.error('Error during signup:', err);
-    socket.emit('signup failed', 'Signup failed. Please try again later.');
+    socket.emit('signup failed', 'Registration failed. Please try again later.');
   }
 });
-
   socket.on('chat message', ({ to, msg }) => {
   if (!socket.username) return;
   const now = new Date();
@@ -678,10 +693,10 @@ socket.on('file message', ({ to, fileUrl, name, type, size, transcription }) => 
     io.to(users[to].socketId).emit('file message', message);
   }
   
-  // Send back to sender
+  // Send back to sender ONLY ONCE
   socket.emit('file message', message);
 
-  // Cross-database file message handling
+  // Cross-database file message handling - DON'T emit a second time to sender
   (async () => {
     try {
       // Check if recipient is external
@@ -693,28 +708,7 @@ socket.on('file message', ({ to, fileUrl, name, type, size, transcription }) => 
       // If recipient is external, save to their database
       if (recipientExternalResult.rows.length > 0) {
         const recipientDB = recipientExternalResult.rows[0];
-        const recipientPool = new Pool({
-          connectionString: recipientDB.database_url,
-          ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
-        });
-        
-        try {
-          // Store the file message in recipient's database
-          const query = `
-            INSERT INTO messages (sender, receiver, message, file_url, file_name, file_type, file_size)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-          `;
-          const placeholderMessage = 'File attachment';
-          await recipientPool.query(
-            query, 
-            [socket.username, to, placeholderMessage, fileUrl, name, type, size]
-          );
-          console.log(`File message from ${socket.username} to ${to} saved to recipient's database`);
-        } catch (err) {
-          console.error('Error saving file message to recipient database:', err);
-        } finally {
-          recipientPool.end();
-        }
+        saveMessageToExternalDB(recipientDB.database_url, socket.username, to, null, { fileUrl, name, type, size });
       }
     } catch (err) {
       console.error('Error in cross-database file messaging:', err);
@@ -722,6 +716,30 @@ socket.on('file message', ({ to, fileUrl, name, type, size, transcription }) => 
   })();
 });
 
+// Helper function to save messages to external DBs without duplicating events
+async function saveMessageToExternalDB(databaseUrl, sender, receiver, msg, fileData) {
+  const extPool = new Pool({
+    connectionString: databaseUrl,
+    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+  });
+  
+  try {
+    if (fileData) {
+      const query = `
+        INSERT INTO messages (sender, receiver, message, file_url, file_name, file_type, file_size)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `;
+      const placeholderMessage = 'File attachment';
+      await extPool.query(query, [sender, receiver, placeholderMessage, fileData.fileUrl, fileData.name, fileData.type, fileData.size]);
+    } else {
+      await extPool.query('INSERT INTO messages (sender, receiver, message) VALUES ($1, $2, $3)', [sender, receiver, msg]);
+    }
+  } catch (err) {
+    console.error('Error inserting message into external DB:', err);
+  } finally {
+    extPool.end();
+  }
+}
   socket.on('file message', ({ to, fileUrl, name, type, size, transcription }) => {
     if (!socket.username) return;
     const now = new Date();
