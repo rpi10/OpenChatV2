@@ -15,6 +15,7 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import Groq from 'groq-sdk';
 import mongoose from 'mongoose';
+import crypto from 'crypto';
 
 dotenv.config();
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
@@ -209,7 +210,9 @@ personalPool.query(`
     username TEXT UNIQUE NOT NULL,
     password TEXT,
     online BOOLEAN DEFAULT FALSE,
-    push_subscription TEXT
+    push_subscription TEXT,
+    public_key TEXT,
+    private_key TEXT
   );
 
   CREATE TABLE IF NOT EXISTS messages (
@@ -221,14 +224,16 @@ personalPool.query(`
     file_name TEXT,
     file_type TEXT,
     file_size INT,
-    timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+    timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    is_encrypted BOOLEAN DEFAULT TRUE
   );
 
   CREATE TABLE IF NOT EXISTS external_databases (
     id SERIAL PRIMARY KEY,
     username TEXT NOT NULL,
     authentificator TEXT NOT NULL,
-    database_url TEXT NOT NULL
+    database_url TEXT NOT NULL,
+    public_key TEXT
   );
 `, (err) => {
   if (err) {
@@ -304,6 +309,56 @@ async function registerGeneralUser(username, password) {
     throw err;
   }
 }
+
+// Add E2E encryption utility functions
+function generateKeyPair() {
+  return crypto.generateKeyPairSync('rsa', {
+    modulusLength: 2048,
+    publicKeyEncoding: {
+      type: 'spki',
+      format: 'pem'
+    },
+    privateKeyEncoding: {
+      type: 'pkcs8',
+      format: 'pem'
+    }
+  });
+}
+
+function encryptMessage(publicKey, message) {
+  if (!message) return null;
+  try {
+    // Encrypt with recipient's public key
+    return crypto.publicEncrypt(
+      {
+        key: publicKey,
+        padding: crypto.constants.RSA_PKCS1_OAEP_PADDING
+      },
+      Buffer.from(message)
+    ).toString('base64');
+  } catch (err) {
+    console.error('Encryption error:', err);
+    return message; // Fallback to unencrypted if encryption fails
+  }
+}
+
+function decryptMessage(privateKey, encryptedMessage) {
+  if (!encryptedMessage) return null;
+  try {
+    // Decrypt with user's private key
+    return crypto.privateDecrypt(
+      {
+        key: privateKey,
+        padding: crypto.constants.RSA_PKCS1_OAEP_PADDING
+      },
+      Buffer.from(encryptedMessage, 'base64')
+    ).toString();
+  } catch (err) {
+    console.error('Decryption error:', err);
+    return encryptedMessage; // Return encrypted text if decryption fails
+  }
+}
+
 // ----------------------------
 // New Endpoint to Link External Databases (Bidirectional Insertion)
 // ----------------------------
@@ -353,6 +408,18 @@ app.post('/link-database', async (req, res) => {
       return res.status(400).json({ error: 'Databases are already linked.' });
     }
     
+    // Get current user's public key
+    const currentUserKeyQuery = await personalPool.query(
+      'SELECT public_key FROM users WHERE username = $1',
+      [currentUser]
+    );
+    
+    if (currentUserKeyQuery.rows.length === 0 || !currentUserKeyQuery.rows[0].public_key) {
+      return res.status(400).json({ error: 'Current user public key not found.' });
+    }
+    
+    const currentUserPublicKey = currentUserKeyQuery.rows[0].public_key;
+    
     // 2. Insert Bob into Alice's users table
     try {
       await personalPool.query(
@@ -366,41 +433,57 @@ app.post('/link-database', async (req, res) => {
       return res.status(500).json({ error: 'Error inserting user into local database.' });
     }
     
-    // 3. Insert into Alice's external_databases table a record for Bob
-    try {
-      await personalPool.query(
-        'INSERT INTO external_databases (username, authentificator, database_url) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
-        [targetUser.username, externalAuthenticator, targetUser.database_url]
-      );
-    } catch (err) {
-      console.error('Error inserting external database record:', err);
-      return res.status(500).json({ error: 'Error inserting external database record.' });
-    }
-    
-    // 4. Connect to Bob's database using Bob's database URL
+    // 3. Connect to Bob's database to get his public key
     let targetExtPool = null;
+    let targetUserPublicKey = null;
+    
     try {
       targetExtPool = new Pool({
         connectionString: targetUser.database_url,
         ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
       });
       
-      // 5. Test connection to target database
-      await targetExtPool.query('SELECT NOW()');
-      
-      // 6. Insert Alice into Bob's users table
-      await targetExtPool.query(
-        `INSERT INTO users (username, password, online)
-         VALUES ($1, $2, FALSE)
-         ON CONFLICT (username) DO NOTHING`,
-        [currentUser, null]
+      // Get Bob's public key
+      const targetUserKeyQuery = await targetExtPool.query(
+        'SELECT public_key FROM users WHERE username = $1',
+        [targetUser.username]
       );
       
-      // 7. Insert Alice's details into Bob's external_databases table
-      await targetExtPool.query(
-        'INSERT INTO external_databases (username, authentificator, database_url) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
-        [currentUser, currentUserRecord.authentificator, currentUserRecord.database_url]
+      if (targetUserKeyQuery.rows.length > 0 && targetUserKeyQuery.rows[0].public_key) {
+        targetUserPublicKey = targetUserKeyQuery.rows[0].public_key;
+      }
+    } catch (err) {
+      console.error('Error retrieving target user public key:', err);
+    }
+    
+    // 4. Insert into Alice's external_databases table a record for Bob with his public key
+    try {
+      await personalPool.query(
+        'INSERT INTO external_databases (username, authentificator, database_url, public_key) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING',
+        [targetUser.username, externalAuthenticator, targetUser.database_url, targetUserPublicKey]
       );
+    } catch (err) {
+      console.error('Error inserting external database record:', err);
+      return res.status(500).json({ error: 'Error inserting external database record.' });
+    }
+    
+    // 5. Insert Alice into Bob's users table
+    try {
+      if (targetExtPool) {
+        // Insert Alice into Bob's users table
+        await targetExtPool.query(
+          `INSERT INTO users (username, password, online)
+           VALUES ($1, $2, FALSE)
+           ON CONFLICT (username) DO NOTHING`,
+          [currentUser, null]
+        );
+        
+        // Insert Alice's details into Bob's external_databases table with her public key
+        await targetExtPool.query(
+          'INSERT INTO external_databases (username, authentificator, database_url, public_key) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING',
+          [currentUser, currentUserRecord.authentificator, currentUserRecord.database_url, currentUserPublicKey]
+        );
+      }
       
       res.json({ 
         message: 'External database linked successfully.',
@@ -537,106 +620,137 @@ io.on('connection', (socket) => {
   });
 
   socket.on('signup', async ({ username, password }) => {
-  try {
-    // Validate inputs
-    if (!username || username.trim() === '') {
-      return socket.emit('signup failed', 'Username cannot be empty.');
-    }
-    
-    if (!password || password.length < 6) {
-      return socket.emit('signup failed', 'Password must be at least 6 characters long.');
-    }
-    
-    // FIRST: Check if user exists in the general database (MongoDB)
-    console.log(`Checking if username '${username}' exists in general database...`);
-    const existingGeneralUser = await GeneralUser.findOne({ username }).exec();
-    
-    if (existingGeneralUser) {
-      console.log(`Username '${username}' already exists in general database.`);
-      return socket.emit('signup failed', 'Username already exists in our system.');
-    }
-    
-    // THEN: Check if user exists in personal database (PostgreSQL)
-    console.log(`Checking if username '${username}' exists in personal database...`);
-    const userQuery = await personalPool.query('SELECT * FROM users WHERE username = $1', [username]);
-    
-    if (userQuery.rows.length > 0) {
-      console.log(`Username '${username}' already exists in personal database.`);
-      return socket.emit('signup failed', 'Username already exists in local database.');
-    }
-    
-    console.log(`Username '${username}' is available. Creating account...`);
-    
-    // Hash password and create user
-    const hashedPassword = await bcrypt.hash(password, 10);
-    
-    // Insert user into both databases in correct order
     try {
-      // First register in general database to get authenticator
-      const generalAuthenticator = await registerGeneralUser(username, hashedPassword);
-      console.log(`User ${username} registered in general database with authenticator: ${generalAuthenticator}`);
-      
-      // Then insert into personal database
-      await personalPool.query(
-        'INSERT INTO users (username, password, online) VALUES ($1, $2, TRUE)', 
-        [username, hashedPassword]
-      );
-      
-      await loginUser(socket, username);
-    } catch (err) {
-      console.error(`Error during account creation for ${username}:`, err);
-      
-      // If the general DB insertion succeeded but the personal DB failed,
-      // we should roll back the general DB entry
-      try {
-        await GeneralUser.deleteOne({ username });
-        console.log(`Rolled back general DB entry for ${username} due to error.`);
-      } catch (rollbackErr) {
-        console.error(`Failed to roll back general DB entry for ${username}:`, rollbackErr);
+      // Validate inputs
+      if (!username || username.trim() === '') {
+        return socket.emit('signup failed', 'Username cannot be empty.');
       }
       
-      return socket.emit('signup failed', 'Error creating account. Please try again.');
+      if (!password || password.length < 6) {
+        return socket.emit('signup failed', 'Password must be at least 6 characters long.');
+      }
+      
+      // FIRST: Check if user exists in the general database (MongoDB)
+      console.log(`Checking if username '${username}' exists in general database...`);
+      const existingGeneralUser = await GeneralUser.findOne({ username }).exec();
+      
+      if (existingGeneralUser) {
+        console.log(`Username '${username}' already exists in general database.`);
+        return socket.emit('signup failed', 'Username already exists in our system.');
+      }
+      
+      // THEN: Check if user exists in personal database (PostgreSQL)
+      console.log(`Checking if username '${username}' exists in personal database...`);
+      const userQuery = await personalPool.query('SELECT * FROM users WHERE username = $1', [username]);
+      
+      if (userQuery.rows.length > 0) {
+        console.log(`Username '${username}' already exists in personal database.`);
+        return socket.emit('signup failed', 'Username already exists in local database.');
+      }
+      
+      console.log(`Username '${username}' is available. Creating account...`);
+      
+      // Hash password and create user
+      const hashedPassword = await bcrypt.hash(password, 10);
+      
+      // Generate RSA keypair for E2E encryption
+      const { publicKey, privateKey } = generateKeyPair();
+      
+      // Insert user into both databases in correct order
+      try {
+        // First register in general database to get authenticator
+        const generalAuthenticator = await registerGeneralUser(username, hashedPassword);
+        console.log(`User ${username} registered in general database with authenticator: ${generalAuthenticator}`);
+        
+        // Then insert into personal database with keypair
+        await personalPool.query(
+          'INSERT INTO users (username, password, online, public_key, private_key) VALUES ($1, $2, TRUE, $3, $4)', 
+          [username, hashedPassword, publicKey, privateKey]
+        );
+        
+        await loginUser(socket, username);
+      } catch (err) {
+        console.error(`Error during account creation for ${username}:`, err);
+        
+        // If the general DB insertion succeeded but the personal DB failed,
+        // we should roll back the general DB entry
+        try {
+          await GeneralUser.deleteOne({ username });
+          console.log(`Rolled back general DB entry for ${username} due to error.`);
+        } catch (rollbackErr) {
+          console.error(`Failed to roll back general DB entry for ${username}:`, rollbackErr);
+        }
+        
+        return socket.emit('signup failed', 'Error creating account. Please try again.');
+      }
+      
+    } catch (err) {
+      console.error('Error during signup:', err);
+      socket.emit('signup failed', 'Registration failed. Please try again later.');
     }
-    
-  } catch (err) {
-    console.error('Error during signup:', err);
-    socket.emit('signup failed', 'Registration failed. Please try again later.');
-  }
-});
-  socket.on('chat message', ({ to, msg }) => {
-  if (!socket.username) return;
-  const now = new Date();
-  const message = {
-    from: socket.username,
-    msg,
-    to,
-    timestamp: formatTime(now),
-    dayLabel: formatDayLabel(now),
-    messageId: generateMessageId()
-  };
+  });
 
-  // Save message to local database - message is stored in sender's database (current user's database)
-  saveMessage(socket.username, to, msg);
-  
-  // Send to recipient if they are online
-  if (users[to] && users[to].online) {
-    io.to(users[to].socketId).emit('chat message', message);
-    io.to(users[to].socketId).emit('notification', `New message from ${socket.username}`);
-    if (users[to].pushSubscription) {
-      sendPushNotification(JSON.parse(users[to].pushSubscription), {
-        title: 'New Message',
-        body: `You have a new message from ${socket.username}`
-      });
-    }
-  }
-  
-  // Send back to sender for UI update
-  socket.emit('chat message', message);
+  socket.on('chat message', async ({ to, msg }) => {
+    if (!socket.username) return;
+    const now = new Date();
+    const message = {
+      from: socket.username,
+      msg,
+      to,
+      timestamp: formatTime(now),
+      dayLabel: formatDayLabel(now),
+      messageId: generateMessageId()
+    };
 
-  // Cross-database messaging
-  (async () => {
     try {
-      // First, check if recipient is an external user by checking the external_databases table
+      // Get recipient's public key for encryption
+      let recipientPublicKey = null;
+      
+      // Check if recipient is an external user
+      const externalUserQuery = await personalPool.query(
+        'SELECT public_key FROM external_databases WHERE username = $1',
+        [to]
+      );
+      
+      if (externalUserQuery.rows.length > 0 && externalUserQuery.rows[0].public_key) {
+        recipientPublicKey = externalUserQuery.rows[0].public_key;
+      } else {
+        // Check if it's a local user
+        const localUserQuery = await personalPool.query(
+          'SELECT public_key FROM users WHERE username = $1',
+          [to]
+        );
+        
+        if (localUserQuery.rows.length > 0 && localUserQuery.rows[0].public_key) {
+          recipientPublicKey = localUserQuery.rows[0].public_key;
+        }
+      }
+      
+      // Encrypt message if we have the recipient's public key
+      let encryptedMsg = msg;
+      if (recipientPublicKey) {
+        encryptedMsg = encryptMessage(recipientPublicKey, msg);
+      }
+      
+      // Save encrypted message to local database
+      saveMessage(socket.username, to, encryptedMsg, recipientPublicKey !== null);
+      
+      // Send original message to recipient if they are online
+      if (users[to] && users[to].online) {
+        io.to(users[to].socketId).emit('chat message', message);
+        io.to(users[to].socketId).emit('notification', `New message from ${socket.username}`);
+        if (users[to].pushSubscription) {
+          sendPushNotification(JSON.parse(users[to].pushSubscription), {
+            title: 'New Message',
+            body: `You have a new message from ${socket.username}`
+          });
+        }
+      }
+      
+      // Send back to sender for UI update
+      socket.emit('chat message', message);
+      
+      // Cross-database messaging
       const recipientExternalResult = await personalPool.query(
         'SELECT * FROM external_databases WHERE username = $1', 
         [to]
@@ -645,63 +759,77 @@ io.on('connection', (socket) => {
       // If recipient is found in external_databases, send the message to their database
       if (recipientExternalResult.rows.length > 0) {
         const recipientDB = recipientExternalResult.rows[0];
-        const recipientPool = new Pool({
-          connectionString: recipientDB.database_url,
-          ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
-        });
-        
-        try {
-          // Store the message in the recipient's database
-          await recipientPool.query(
-            'INSERT INTO messages (sender, receiver, message) VALUES ($1, $2, $3)', 
-            [socket.username, to, msg]
-          );
-          console.log(`Message from ${socket.username} to ${to} saved to recipient's database`);
-        } catch (err) {
-          console.error('Error saving message to recipient database:', err);
-        } finally {
-          recipientPool.end();
-        }
+        saveMessageToExternalDB(recipientDB.database_url, socket.username, to, encryptedMsg, null, recipientPublicKey !== null);
       }
     } catch (err) {
-      console.error('Error in cross-database messaging:', err);
+      console.error('Error in encrypted chat message:', err);
     }
-  })();
-});
+  });
 
-// Similarly update the file message handler
-socket.on('file message', ({ to, fileUrl, name, type, size, transcription }) => {
-  if (!socket.username) return;
-  const now = new Date();
-  const message = {
-    from: socket.username,
-    fileUrl,
-    name,
-    type,
-    size,
-    to,
-    timestamp: formatTime(now),
-    dayLabel: formatDayLabel(now),
-    messageId: generateMessageId(),
-    recorded: true
-  };
+  socket.on('file message', async ({ to, fileUrl, name, type, size, transcription }) => {
+    if (!socket.username) return;
+    const now = new Date();
+    const message = {
+      from: socket.username,
+      fileUrl,
+      name,
+      type,
+      size,
+      to,
+      timestamp: formatTime(now),
+      dayLabel: formatDayLabel(now),
+      messageId: generateMessageId(),
+      recorded: true
+    };
 
-  // Save to sender's database
-  saveFileMessage(socket.username, to, fileUrl, name, type, size);
-  
-  // Send to recipient if online
-  if (users[to] && users[to].online) {
-    io.to(users[to].socketId).emit('file message', message);
-    io.to(users[to].socketId).emit('notification', `New file from ${socket.username}`);
-  }
-  
-  // Send back to sender for UI update (just once)
-  socket.emit('file message', { ...message, _preventDuplicate: true });
-
-  // Cross-database file message handling
-  (async () => {
     try {
-      // Check if recipient is external
+      // Get recipient's public key for encryption
+      let recipientPublicKey = null;
+      
+      // Check if recipient is an external user
+      const externalUserQuery = await personalPool.query(
+        'SELECT public_key FROM external_databases WHERE username = $1',
+        [to]
+      );
+      
+      if (externalUserQuery.rows.length > 0 && externalUserQuery.rows[0].public_key) {
+        recipientPublicKey = externalUserQuery.rows[0].public_key;
+      } else {
+        // Check if it's a local user
+        const localUserQuery = await personalPool.query(
+          'SELECT public_key FROM users WHERE username = $1',
+          [to]
+        );
+        
+        if (localUserQuery.rows.length > 0 && localUserQuery.rows[0].public_key) {
+          recipientPublicKey = localUserQuery.rows[0].public_key;
+        }
+      }
+      
+      // Encrypt file info if we have recipient's public key
+      let encryptedName = name;
+      let encryptedType = type;
+      let encryptedUrl = fileUrl;
+      
+      if (recipientPublicKey) {
+        encryptedName = encryptMessage(recipientPublicKey, name);
+        encryptedType = encryptMessage(recipientPublicKey, type);
+        encryptedUrl = encryptMessage(recipientPublicKey, fileUrl);
+      }
+      
+      // Save encrypted file message to local database
+      saveFileMessage(socket.username, to, encryptedUrl, encryptedName, encryptedType, size, recipientPublicKey !== null);
+      
+      // Send original message to recipient if they are online
+      if (users[to] && users[to].online) {
+        io.to(users[to].socketId).emit('file message', message);
+        io.to(users[to].socketId).emit('notification', `New file from ${socket.username}`);
+      }
+      
+      // Send back to sender for UI update
+      socket.emit('file message', { ...message, _preventDuplicate: true });
+      
+      // Cross-database file message handling
       const recipientExternalResult = await personalPool.query(
         'SELECT * FROM external_databases WHERE username = $1', 
         [to]
@@ -710,38 +838,19 @@ socket.on('file message', ({ to, fileUrl, name, type, size, transcription }) => 
       // If recipient is external, save to their database
       if (recipientExternalResult.rows.length > 0) {
         const recipientDB = recipientExternalResult.rows[0];
-        saveMessageToExternalDB(recipientDB.database_url, socket.username, to, null, { fileUrl, name, type, size });
+        saveMessageToExternalDB(
+          recipientDB.database_url, 
+          socket.username, 
+          to, 
+          null, 
+          { fileUrl: encryptedUrl, name: encryptedName, type: encryptedType, size }, 
+          recipientPublicKey !== null
+        );
       }
     } catch (err) {
-      console.error('Error in cross-database file messaging:', err);
+      console.error('Error in encrypted file message:', err);
     }
-  })();
-});
-
-// Helper function to save messages to external DBs without duplicating events
-async function saveMessageToExternalDB(databaseUrl, sender, receiver, msg, fileData) {
-  const extPool = new Pool({
-    connectionString: databaseUrl,
-    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
   });
-  
-  try {
-    if (fileData) {
-      const query = `
-        INSERT INTO messages (sender, receiver, message, file_url, file_name, file_type, file_size)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
-      `;
-      const placeholderMessage = 'File attachment';
-      await extPool.query(query, [sender, receiver, placeholderMessage, fileData.fileUrl, fileData.name, fileData.type, fileData.size]);
-    } else {
-      await extPool.query('INSERT INTO messages (sender, receiver, message) VALUES ($1, $2, $3)', [sender, receiver, msg]);
-    }
-  } catch (err) {
-    console.error('Error inserting message into external DB:', err);
-  } finally {
-    extPool.end();
-  }
-}
 
   socket.on('load messages', ({ user }) => {
     if (socket.username && user) {
@@ -824,6 +933,28 @@ async function loginUser(socket, username) {
     console.error('Error retrieving authentificator for', username, error);
   }
 
+  // Check for missing keypair and generate if needed
+  try {
+    const keyQuery = await personalPool.query(
+      'SELECT public_key, private_key FROM users WHERE username = $1',
+      [username]
+    );
+    
+    if (keyQuery.rows.length > 0) {
+      const user = keyQuery.rows[0];
+      if (!user.public_key || !user.private_key) {
+        console.log(`User ${username} is missing encryption keys. Generating...`);
+        const { publicKey, privateKey } = generateKeyPair();
+        await personalPool.query(
+          'UPDATE users SET public_key = $1, private_key = $2 WHERE username = $3',
+          [publicKey, privateKey, username]
+        );
+      }
+    }
+  } catch (error) {
+    console.error('Error checking/generating keypair for', username, error);
+  }
+
   console.log(`User ${username} logging in with authentificator: ${authentificator}`);
   socket.emit('login success', { username, authentificator });
   
@@ -834,21 +965,29 @@ async function loginUser(socket, username) {
   });
 }
 
-function saveMessage(sender, receiver, message) {
-  personalPool.query('INSERT INTO messages (sender, receiver, message) VALUES ($1, $2, $3)', [sender, receiver, message], (err) => {
-    if (err) console.error('Error saving message:', err);
-  });
+function saveMessage(sender, receiver, message, isEncrypted = true) {
+  personalPool.query(
+    'INSERT INTO messages (sender, receiver, message, is_encrypted) VALUES ($1, $2, $3, $4)', 
+    [sender, receiver, message, isEncrypted], 
+    (err) => {
+      if (err) console.error('Error saving message:', err);
+    }
+  );
 }
 
-function saveFileMessage(sender, receiver, fileUrl, name, type, size) {
+function saveFileMessage(sender, receiver, fileUrl, name, type, size, isEncrypted = true) {
   const query = `
-    INSERT INTO messages (sender, receiver, message, file_url, file_name, file_type, file_size)
-    VALUES ($1, $2, $3, $4, $5, $6, $7)
+    INSERT INTO messages (sender, receiver, message, file_url, file_name, file_type, file_size, is_encrypted)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
   `;
   const placeholderMessage = 'File attachment';
-  personalPool.query(query, [sender, receiver, placeholderMessage, fileUrl, name, type, size], (err) => {
-    if (err) console.error('Error saving file message:', err);
-  });
+  personalPool.query(
+    query, 
+    [sender, receiver, placeholderMessage, fileUrl, name, type, size, isEncrypted], 
+    (err) => {
+      if (err) console.error('Error saving file message:', err);
+    }
+  );
 }
 
 function loadPrivateMessageHistory(user1, user2, callback) {
@@ -856,35 +995,81 @@ function loadPrivateMessageHistory(user1, user2, callback) {
     callback([]);
     return;
   }
-  const query = `
-    SELECT sender, receiver, message, file_url, file_name, file_type, file_size, timestamp
-    FROM messages
-    WHERE (sender = $1 AND receiver = $2) OR (sender = $2 AND receiver = $1)
-    ORDER BY timestamp ASC
-  `;
-  personalPool.query(query, [user1, user2], (err, result) => {
-    if (err) {
-      console.error('Error loading message history:', err);
+  
+  try {
+    // Get the user's private key for decryption
+    const userKeyQuery = await personalPool.query(
+      'SELECT private_key FROM users WHERE username = $1',
+      [user1]
+    );
+    
+    if (userKeyQuery.rows.length === 0 || !userKeyQuery.rows[0].private_key) {
+      console.error('Could not find private key for user:', user1);
       callback([]);
-    } else {
-      const messages = result.rows.map(row => {
-        const isFileMessage = row.file_url && row.file_name;
-        return {
-          from: row.sender,
-          to: row.receiver,
-          msg: isFileMessage ? 'File attachment' : row.message,
-          fileUrl: row.file_url,
-          fileName: row.file_name,
-          fileType: row.file_type,
-          fileSize: row.file_size,
-          timestamp: formatTime(row.timestamp),
-          dayLabel: formatDayLabel(row.timestamp),
-          isFileMessage: isFileMessage
-        };
-      });
-      callback(messages);
+      return;
     }
-  });
+    
+    const privateKey = userKeyQuery.rows[0].private_key;
+    
+    const query = `
+      SELECT sender, receiver, message, file_url, file_name, file_type, file_size, timestamp, is_encrypted
+      FROM messages
+      WHERE (sender = $1 AND receiver = $2) OR (sender = $2 AND receiver = $1)
+      ORDER BY timestamp ASC
+    `;
+    
+    personalPool.query(query, [user1, user2], (err, result) => {
+      if (err) {
+        console.error('Error loading message history:', err);
+        callback([]);
+      } else {
+        const messages = result.rows.map(row => {
+          const isFileMessage = row.file_url && row.file_name;
+          
+          // Decrypt message content if it's encrypted
+          let decryptedMessage = row.message;
+          let decryptedFileUrl = row.file_url;
+          let decryptedFileName = row.file_name;
+          let decryptedFileType = row.file_type;
+          
+          if (row.is_encrypted) {
+            try {
+              if (!isFileMessage) {
+                decryptedMessage = decryptMessage(privateKey, row.message);
+              }
+              
+              if (isFileMessage) {
+                if (row.file_url) decryptedFileUrl = decryptMessage(privateKey, row.file_url);
+                if (row.file_name) decryptedFileName = decryptMessage(privateKey, row.file_name);
+                if (row.file_type) decryptedFileType = decryptMessage(privateKey, row.file_type);
+              }
+            } catch (error) {
+              console.error('Error decrypting message:', error);
+              // Fall back to encrypted content if decryption fails
+            }
+          }
+          
+          return {
+            from: row.sender,
+            to: row.receiver,
+            msg: isFileMessage ? 'File attachment' : decryptedMessage,
+            fileUrl: decryptedFileUrl,
+            name: decryptedFileName,
+            type: decryptedFileType,
+            fileSize: row.file_size,
+            timestamp: formatTime(row.timestamp),
+            dayLabel: formatDayLabel(row.timestamp),
+            messageId: generateMessageId(),
+            isFileMessage: isFileMessage
+          };
+        });
+        callback(messages);
+      }
+    });
+  } catch (error) {
+    console.error('Error in message history decryption:', error);
+    callback([]);
+  }
 }
 
 function formatDate(date) {
