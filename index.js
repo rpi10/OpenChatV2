@@ -208,35 +208,26 @@ personalPool.query(`
   DO $$ 
   BEGIN
     -- Create users table if it doesn't exist
-    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'users') THEN
+    IF NOT EXISTS (
+      SELECT 1 FROM information_schema.tables 
+      WHERE table_schema='public' AND table_name='users'
+    ) THEN
       CREATE TABLE users (
         id SERIAL PRIMARY KEY,
         username TEXT UNIQUE NOT NULL,
         password TEXT,
         online BOOLEAN DEFAULT FALSE,
-        push_subscription TEXT
+        push_subscription TEXT,
+        public_key TEXT,
+        private_key TEXT
       );
     END IF;
 
-    -- Add public_key and private_key columns if they don't exist
-    IF NOT EXISTS (
-      SELECT 1 
-      FROM information_schema.columns 
-      WHERE table_name='users' AND column_name='public_key'
-    ) THEN
-      ALTER TABLE users ADD COLUMN public_key TEXT;
-    END IF;
-
-    IF NOT EXISTS (
-      SELECT 1 
-      FROM information_schema.columns 
-      WHERE table_name='users' AND column_name='private_key'
-    ) THEN
-      ALTER TABLE users ADD COLUMN private_key TEXT;
-    END IF;
-
     -- Create messages table if it doesn't exist
-    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'messages') THEN
+    IF NOT EXISTS (
+      SELECT 1 FROM information_schema.tables 
+      WHERE table_schema='public' AND table_name='messages'
+    ) THEN
       CREATE TABLE messages (
         id SERIAL PRIMARY KEY,
         sender TEXT,
@@ -252,7 +243,10 @@ personalPool.query(`
     END IF;
 
     -- Create external_databases table if it doesn't exist
-    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'external_databases') THEN
+    IF NOT EXISTS (
+      SELECT 1 FROM information_schema.tables 
+      WHERE table_schema='public' AND table_name='external_databases'
+    ) THEN
       CREATE TABLE external_databases (
         id SERIAL PRIMARY KEY,
         username TEXT NOT NULL,
@@ -261,6 +255,31 @@ personalPool.query(`
         public_key TEXT
       );
     END IF;
+
+    -- Add columns if they don't exist (for existing tables)
+    -- For users table
+    IF NOT EXISTS (
+      SELECT 1 FROM information_schema.columns 
+      WHERE table_name='users' AND column_name='public_key'
+    ) THEN
+      ALTER TABLE users ADD COLUMN public_key TEXT;
+    END IF;
+
+    IF NOT EXISTS (
+      SELECT 1 FROM information_schema.columns 
+      WHERE table_name='users' AND column_name='private_key'
+    ) THEN
+      ALTER TABLE users ADD COLUMN private_key TEXT;
+    END IF;
+
+    -- For external_databases table
+    IF NOT EXISTS (
+      SELECT 1 FROM information_schema.columns 
+      WHERE table_name='external_databases' AND column_name='public_key'
+    ) THEN
+      ALTER TABLE external_databases ADD COLUMN public_key TEXT;
+    END IF;
+
   END $$;
 `, (err) => {
   if (err) {
