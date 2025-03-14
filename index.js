@@ -15,6 +15,7 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import Groq from 'groq-sdk';
 import mongoose from 'mongoose';
+import crypto from 'crypto';
 
 dotenv.config();
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
@@ -604,6 +605,34 @@ io.on('connection', (socket) => {
     socket.emit('signup failed', 'Registration failed. Please try again later.');
   }
 });
+
+
+// Generate RSA keys (in production, keys would be pre-generated and securely stored)
+const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', {
+  modulusLength: 4096,
+  publicKeyEncoding: {
+    type: 'spki',
+    format: 'pem'
+  },
+  privateKeyEncoding: {
+    type: 'pkcs8',
+    format: 'pem'
+  }
+});
+
+// Helper functions for encryption/decryption
+function encryptData(data) {
+  const buffer = Buffer.from(JSON.stringify(data));
+  const encrypted = crypto.publicEncrypt(publicKey, buffer);
+  return encrypted.toString('base64');
+}
+
+function decryptData(encryptedData) {
+  const buffer = Buffer.from(encryptedData, 'base64');
+  const decrypted = crypto.privateDecrypt(privateKey, buffer);
+  return JSON.parse(decrypted.toString());
+}
+
   socket.on('chat message', ({ to, msg }) => {
   if (!socket.username) return;
   const now = new Date();
@@ -616,6 +645,7 @@ io.on('connection', (socket) => {
     messageId: generateMessageId()
   };
 
+  const encryptedMessage = encryptData(message);
   // Save message to local database - message is stored in sender's database (current user's database)
   saveMessage(socket.username, to, msg);
   
@@ -687,14 +717,19 @@ socket.on('file message', ({ to, fileUrl, name, type, size, transcription }) => 
     recorded: true
   };
 
+  
+  const encryptedFileMessage = encryptData(message);
+
   // Save to sender's database
   saveFileMessage(socket.username, to, fileUrl, name, type, size);
-  
+
+
   // Send to recipient if online
   if (users[to] && users[to].online) {
     io.to(users[to].socketId).emit('file message', message);
   }
-  
+  socket.emit('file message', message);
+
 
   // Cross-database file message handling - DON'T emit a second time to sender
   (async () => {
@@ -760,7 +795,7 @@ async function saveMessageToExternalDB(databaseUrl, sender, receiver, msg, fileD
     if (users[to] && users[to].online) {
       io.to(users[to].socketId).emit('file message', message);
     }
-    //socket.emit('file message', message);
+    socket.emit('file message', message);
 
     (async () => {
       try {
