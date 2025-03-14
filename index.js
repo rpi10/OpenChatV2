@@ -205,36 +205,63 @@ const GeneralUser = mongoose.model('GeneralUser', generalUserSchema);
 // Create or Update Tables in Personal Database
 // ----------------------------
 personalPool.query(`
-  CREATE TABLE IF NOT EXISTS users (
-    id SERIAL PRIMARY KEY,
-    username TEXT UNIQUE NOT NULL,
-    password TEXT,
-    online BOOLEAN DEFAULT FALSE,
-    push_subscription TEXT,
-    public_key TEXT,
-    private_key TEXT
-  );
+  DO $$ 
+  BEGIN
+    -- Create users table if it doesn't exist
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'users') THEN
+      CREATE TABLE users (
+        id SERIAL PRIMARY KEY,
+        username TEXT UNIQUE NOT NULL,
+        password TEXT,
+        online BOOLEAN DEFAULT FALSE,
+        push_subscription TEXT
+      );
+    END IF;
 
-  CREATE TABLE IF NOT EXISTS messages (
-    id SERIAL PRIMARY KEY,
-    sender TEXT,
-    receiver TEXT,
-    message TEXT,
-    file_url TEXT,
-    file_name TEXT,
-    file_type TEXT,
-    file_size INT,
-    timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    is_encrypted BOOLEAN DEFAULT TRUE
-  );
+    -- Add public_key and private_key columns if they don't exist
+    IF NOT EXISTS (
+      SELECT 1 
+      FROM information_schema.columns 
+      WHERE table_name='users' AND column_name='public_key'
+    ) THEN
+      ALTER TABLE users ADD COLUMN public_key TEXT;
+    END IF;
 
-  CREATE TABLE IF NOT EXISTS external_databases (
-    id SERIAL PRIMARY KEY,
-    username TEXT NOT NULL,
-    authentificator TEXT NOT NULL,
-    database_url TEXT NOT NULL,
-    public_key TEXT
-  );
+    IF NOT EXISTS (
+      SELECT 1 
+      FROM information_schema.columns 
+      WHERE table_name='users' AND column_name='private_key'
+    ) THEN
+      ALTER TABLE users ADD COLUMN private_key TEXT;
+    END IF;
+
+    -- Create messages table if it doesn't exist
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'messages') THEN
+      CREATE TABLE messages (
+        id SERIAL PRIMARY KEY,
+        sender TEXT,
+        receiver TEXT,
+        message TEXT,
+        file_url TEXT,
+        file_name TEXT,
+        file_type TEXT,
+        file_size INT,
+        timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        is_encrypted BOOLEAN DEFAULT TRUE
+      );
+    END IF;
+
+    -- Create external_databases table if it doesn't exist
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'external_databases') THEN
+      CREATE TABLE external_databases (
+        id SERIAL PRIMARY KEY,
+        username TEXT NOT NULL,
+        authentificator TEXT NOT NULL,
+        database_url TEXT NOT NULL,
+        public_key TEXT
+      );
+    END IF;
+  END $$;
 `, (err) => {
   if (err) {
     console.error('Error creating tables in personal database:', err);
