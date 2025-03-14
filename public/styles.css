@@ -619,7 +619,7 @@ body {
   padding: 0 20px;
 }
 
-.close-modal {
+.close-image {
   color: white;
   font-size: 35px;
   background: none;
@@ -627,7 +627,7 @@ body {
   cursor: pointer;
 }
 
-.download-modal {
+.download-image {
   background: white;
   color: #128C7E;
   padding: 8px 15px;
