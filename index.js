@@ -695,7 +695,6 @@ socket.on('file message', ({ to, fileUrl, name, type, size, transcription }) => 
     io.to(users[to].socketId).emit('file message', message);
   }
   
-  // Send back to sender ONLY ONCE
 
   // Cross-database file message handling - DON'T emit a second time to sender
   (async () => {
@@ -761,7 +760,7 @@ async function saveMessageToExternalDB(databaseUrl, sender, receiver, msg, fileD
     if (users[to] && users[to].online) {
       io.to(users[to].socketId).emit('file message', message);
     }
-    socket.emit('file message', message);
+    //socket.emit('file message', message);
 
     (async () => {
       try {
