@@ -672,7 +672,7 @@ io.on('connection', (socket) => {
 });
 
 // Similarly update the file message handler
-socket.on('file message', ({ to, fileUrl, name, type, size, transcription }) => {
+socket.on('file message', async ({ to, fileUrl, name, type, size, transcription }) => {
   if (!socket.username) return;
   const now = new Date();
   const message = {
@@ -688,54 +688,123 @@ socket.on('file message', ({ to, fileUrl, name, type, size, transcription }) => 
     recorded: true
   };
 
-  // Save to sender's database
-  saveFileMessage(socket.username, to, fileUrl, name, type, size);
-  
-  // Send to recipient if online
-  if (users[to] && users[to].online) {
-    io.to(users[to].socketId).emit('file message', message);
-  }
+  try {
+    // Save to sender's database
+    await saveFileMessage(socket.username, to, fileUrl, name, type, size);
 
-  socket.emit('file message', message)
-  
-
-  // Cross-database file message handling - DON'T emit a second time to sender
-  (async () => {
-    try {
-      // Check if recipient is external
-      const recipientExternalResult = await personalPool.query(
-        'SELECT * FROM external_databases WHERE username = $1', 
-        [to]
-      );
-      
-      // If recipient is external, save to their database
-      if (recipientExternalResult.rows.length > 0) {
-        const recipientDB = recipientExternalResult.rows[0];
-        saveMessageToExternalDB(recipientDB.database_url, socket.username, to, null, { fileUrl, name, type, size });
-      }
-    } catch (err) {
-      console.error('Error in cross-database file messaging:', err);
+    // Send to recipient if online
+    if (users[to] && users[to].online) {
+      io.to(users[to].socketId).emit('file message', message);
     }
-  })();
+
+    // Emit back to sender (ensure it is only emitted once)
+    socket.emit('file message', message);
+
+    // Check if recipient is external
+    const recipientExternalResult = await personalPool.query(
+      'SELECT * FROM external_databases WHERE username = $1', 
+      [to]
+    );
+
+    if (recipientExternalResult.rows.length > 0) {
+      const recipientDB = recipientExternalResult.rows[0];
+      await saveMessageToExternalDB(recipientDB.database_url, socket.username, to, null, { fileUrl, name, type, size });
+    }
+  } catch (err) {
+    console.error('Error in cross-database file messaging:', err);
+  }
 });
 
-// Helper function to save messages to external DBs without duplicating events
+// ----------------------------
+// Fix Load Messages
+// ----------------------------
+socket.on('load messages', async ({ user }) => {
+  if (!socket.username || !user) {
+    socket.emit('chat history', []);
+    return;
+  }
+
+  try {
+    // Load messages from personal DB
+    let messages = await loadPrivateMessageHistory(socket.username, user);
+
+    // Check if user is linked to an external DB
+    const externalLinksResult = await personalPool.query(
+      'SELECT database_url FROM external_databases WHERE username = $1', 
+      [socket.username]
+    );
+
+    for (const link of externalLinksResult.rows) {
+      const externalMessages = await loadExternalMessages(link.database_url, socket.username, user);
+      messages = [...messages, ...externalMessages];
+    }
+
+    // Sort messages by timestamp to maintain order
+    messages.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+
+    socket.emit('chat history', messages);
+  } catch (err) {
+    console.error('Error loading messages:', err);
+    socket.emit('chat history', []);
+  }
+});
+
+// ----------------------------
+// Fix Load Messages from External Database
+// ----------------------------
+async function loadExternalMessages(databaseUrl, user1, user2) {
+  const extPool = new Pool({
+    connectionString: databaseUrl,
+    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+  });
+
+  try {
+    const query = `
+      SELECT sender, receiver, message, file_url, file_name, file_type, file_size, timestamp
+      FROM messages
+      WHERE (sender = $1 AND receiver = $2) OR (sender = $2 AND receiver = $1)
+      ORDER BY timestamp ASC
+    `;
+    const result = await extPool.query(query, [user1, user2]);
+
+    return result.rows.map(row => ({
+      from: row.sender,
+      to: row.receiver,
+      msg: row.file_url ? "File attachment" : row.message,
+      fileUrl: row.file_url,
+      fileName: row.file_name,
+      fileType: row.file_type,
+      fileSize: row.file_size,
+      timestamp: row.timestamp,
+      isFileMessage: !!row.file_url
+    }));
+  } catch (err) {
+    console.error('Error loading messages from external DB:', err);
+    return [];
+  } finally {
+    extPool.end();
+  }
+}
+
+// ----------------------------
+// Fix Save Message to External DB
+// ----------------------------
 async function saveMessageToExternalDB(databaseUrl, sender, receiver, msg, fileData) {
   const extPool = new Pool({
     connectionString: databaseUrl,
     ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
   });
-  
+
   try {
     if (fileData) {
       const query = `
-        INSERT INTO messages (sender, receiver, message, file_url, file_name, file_type, file_size)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        INSERT INTO messages (sender, receiver, message, file_url, file_name, file_type, file_size, timestamp)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
       `;
-      const placeholderMessage = 'File attachment';
-      await extPool.query(query, [sender, receiver, placeholderMessage, fileData.fileUrl, fileData.name, fileData.type, fileData.size]);
+      await extPool.query(query, [sender, receiver, 'File attachment', fileData.fileUrl, fileData.name, fileData.type, fileData.size]);
     } else {
-      await extPool.query('INSERT INTO messages (sender, receiver, message) VALUES ($1, $2, $3)', [sender, receiver, msg]);
+      await extPool.query('INSERT INTO messages (sender, receiver, message, timestamp) VALUES ($1, $2, $3, NOW())', 
+                          [sender, receiver, msg]);
     }
   } catch (err) {
     console.error('Error inserting message into external DB:', err);
@@ -743,8 +812,6 @@ async function saveMessageToExternalDB(databaseUrl, sender, receiver, msg, fileD
     extPool.end();
   }
 }
-
-
   socket.on('load messages', ({ user }) => {
     if (socket.username && user) {
       loadPrivateMessageHistory(socket.username, user, (messages) => {
