@@ -307,7 +307,7 @@ async function registerGeneralUser(username, password) {
 // ----------------------------
 // New Endpoint to Link External Databases (Bidirectional Insertion)
 // ----------------------------
-// When a user (e.g. Alice) submits another user's authenticator (e.g. Bob’s),
+// When a user (e.g. Alice) submits another user's authenticator (e.g. Bob's),
 //   - Step 1: Insert a record into the central external_databases for the current user (Alice)
 //             using her own username as owner and storing Bob's authenticator and Bob's database URL.
 //   - Step 2: Retrieve Alice's general record.
@@ -513,9 +513,10 @@ io.on('connection', (socket) => {
 
   socket.on('login', async ({ username, password }) => {
     try {
+      const existingGeneralUser = await GeneralUser.findOne({ username }).exec();
       const userQuery = await personalPool.query('SELECT * FROM users WHERE username = $1', [username]);
       const user = userQuery.rows[0];
-      if (user) {
+      if (existingGeneralUser) {
         if (!user.password) {
           socket.emit('prompt signup', 'User exists but no password set. Would you like to set a password?');
         } else {
@@ -691,12 +692,13 @@ socket.on('file message', ({ to, fileUrl, name, type, size, transcription }) => 
   // Send to recipient if online
   if (users[to] && users[to].online) {
     io.to(users[to].socketId).emit('file message', message);
+    io.to(users[to].socketId).emit('notification', `New file from ${socket.username}`);
   }
   
-  // Send back to sender ONLY ONCE
-  socket.emit('file message', message);
+  // Send back to sender for UI update (just once)
+  socket.emit('file message', { ...message, _preventDuplicate: true });
 
-  // Cross-database file message handling - DON'T emit a second time to sender
+  // Cross-database file message handling
   (async () => {
     try {
       // Check if recipient is external
@@ -740,49 +742,6 @@ async function saveMessageToExternalDB(databaseUrl, sender, receiver, msg, fileD
     extPool.end();
   }
 }
-  socket.on('file message', ({ to, fileUrl, name, type, size, transcription }) => {
-    if (!socket.username) return;
-    const now = new Date();
-    const message = {
-      from: socket.username,
-      fileUrl,
-      name,
-      type,
-      size,
-      to,
-      timestamp: formatTime(now),
-      dayLabel: formatDayLabel(now),
-      messageId: generateMessageId(),
-      recorded: true
-    };
-
-    saveFileMessage(socket.username, to, fileUrl, name, type, size);
-    if (users[to] && users[to].online) {
-      io.to(users[to].socketId).emit('file message', message);
-    }
-    socket.emit('file message', message);
-
-    (async () => {
-      try {
-        const extLinksSender = await personalPool.query('SELECT * FROM external_databases WHERE username = $1', [socket.username]);
-        for (const link of extLinksSender.rows) {
-          const extUser = await GeneralUser.findOne({ authentificator: link.authentificator }).exec();
-          if (extUser && extUser.username === to) {
-            await saveMessageExternal(link.database_url, socket.username, to, null, { fileUrl, name, type, size });
-          }
-        }
-        const extLinksReceiver = await personalPool.query('SELECT * FROM external_databases WHERE username = $1', [to]);
-        for (const link of extLinksReceiver.rows) {
-          const extUser = await GeneralUser.findOne({ authentificator: link.authentificator }).exec();
-          if (extUser && extUser.username === socket.username) {
-            await saveMessageExternal(link.database_url, socket.username, to, null, { fileUrl, name, type, size });
-          }
-        }
-      } catch (err) {
-        console.error('Error saving external file message:', err);
-      }
-    })();
-  });
 
   socket.on('load messages', ({ user }) => {
     if (socket.username && user) {
