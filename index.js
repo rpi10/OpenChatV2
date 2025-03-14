@@ -517,7 +517,7 @@ io.on('connection', (socket) => {
       const user = userQuery.rows[0];
       const existingGeneralUser = await GeneralUser.findOne({ username }).exec();
 
-      if (user) {
+      if (existingGeneralUser) {
         if (!user.password) {
           socket.emit('prompt signup', 'User exists but no password set. Would you like to set a password?');
         } else {
@@ -528,7 +528,8 @@ io.on('connection', (socket) => {
             socket.emit('login failed', 'Invalid password.');
           }
         }
-      } else {
+      } 
+      else {
         socket.emit('prompt signup', 'User not found. Would you like to sign up?');
       }
     } catch (err) {
@@ -760,7 +761,6 @@ async function saveMessageToExternalDB(databaseUrl, sender, receiver, msg, fileD
     if (users[to] && users[to].online) {
       io.to(users[to].socketId).emit('file message', message);
     }
-    //socket.emit('file message', message);
 
     (async () => {
       try {
@@ -870,10 +870,7 @@ async function loginUser(socket, username) {
   
   loadCombinedUsers(socket);
   
-  loadPrivateMessageHistory(username, null, (messages) => {
-    socket.emit('chat history', messages);
-  });
-}
+  
 
 function saveMessage(sender, receiver, message) {
   personalPool.query('INSERT INTO messages (sender, receiver, message) VALUES ($1, $2, $3)', [sender, receiver, message], (err) => {
