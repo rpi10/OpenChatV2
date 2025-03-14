@@ -515,6 +515,8 @@ io.on('connection', (socket) => {
     try {
       const userQuery = await personalPool.query('SELECT * FROM users WHERE username = $1', [username]);
       const user = userQuery.rows[0];
+      const existingGeneralUser = await GeneralUser.findOne({ username }).exec();
+
       if (user) {
         if (!user.password) {
           socket.emit('prompt signup', 'User exists but no password set. Would you like to set a password?');
@@ -694,7 +696,6 @@ socket.on('file message', ({ to, fileUrl, name, type, size, transcription }) => 
   }
   
   // Send back to sender ONLY ONCE
-  socket.emit('file message', message);
 
   // Cross-database file message handling - DON'T emit a second time to sender
   (async () => {
