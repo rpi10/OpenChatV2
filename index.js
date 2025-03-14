@@ -607,20 +607,13 @@ io.on('connection', (socket) => {
 });
 
 
-// Generate RSA keys (in production, keys would be pre-generated and securely stored)
+// === RSA Key Generation and Encryption Helpers (placed only once at the top) ===
 const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', {
   modulusLength: 4096,
-  publicKeyEncoding: {
-    type: 'spki',
-    format: 'pem'
-  },
-  privateKeyEncoding: {
-    type: 'pkcs8',
-    format: 'pem'
-  }
+  publicKeyEncoding: { type: 'spki', format: 'pem' },
+  privateKeyEncoding: { type: 'pkcs8', format: 'pem' }
 });
 
-// Helper functions for encryption/decryption
 function encryptData(data) {
   const buffer = Buffer.from(JSON.stringify(data));
   const encrypted = crypto.publicEncrypt(publicKey, buffer);
@@ -633,148 +626,75 @@ function decryptData(encryptedData) {
   return JSON.parse(decrypted.toString());
 }
 
+// === Socket.IO Event Handling ===
+io.on('connection', (socket) => {
+  console.log('A user connected');
+
+  // --- Chat Message Handler ---
   socket.on('chat message', ({ to, msg }) => {
-  if (!socket.username) return;
-  const now = new Date();
-  const message = {
-    from: socket.username,
-    msg,
-    to,
-    timestamp: formatTime(now),
-    dayLabel: formatDayLabel(now),
-    messageId: generateMessageId()
-  };
+    if (!socket.username) return;
+    const now = new Date();
+    const message = {
+      from: socket.username,
+      msg,
+      to,
+      timestamp: formatTime(now),
+      dayLabel: formatDayLabel(now),
+      messageId: generateMessageId()
+    };
 
-  const encryptedMessage = encryptData(message);
-  // Save message to local database - message is stored in sender's database (current user's database)
-  saveMessage(socket.username, to, msg);
-  
-  // Send to recipient if they are online
-  if (users[to] && users[to].online) {
-    io.to(users[to].socketId).emit('chat message', message);
-    io.to(users[to].socketId).emit('notification', `New message from ${socket.username}`);
-    if (users[to].pushSubscription) {
-      sendPushNotification(JSON.parse(users[to].pushSubscription), {
-        title: 'New Message',
-        body: `You have a new message from ${socket.username}`
-      });
-    }
-  }
-  
-  // Send back to sender for UI update
-  socket.emit('chat message', message);
+    // Encrypt the full message object before saving it
+    const encryptedMessage = encryptData(message);
 
-  // Cross-database messaging
-  (async () => {
-    try {
-      // First, check if recipient is an external user by checking the external_databases table
-      const recipientExternalResult = await personalPool.query(
-        'SELECT * FROM external_databases WHERE username = $1', 
-        [to]
-      );
-      
-      // If recipient is found in external_databases, send the message to their database
-      if (recipientExternalResult.rows.length > 0) {
-        const recipientDB = recipientExternalResult.rows[0];
-        const recipientPool = new Pool({
-          connectionString: recipientDB.database_url,
-          ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+    // Save the encrypted message to sender's database
+    saveMessage(socket.username, to, encryptedMessage);
+
+    // Immediately send the plain (decrypted) message to recipient if online
+    if (users[to] && users[to].online) {
+      io.to(users[to].socketId).emit('chat message', message);
+      io.to(users[to].socketId).emit('notification', `New message from ${socket.username}`);
+      if (users[to].pushSubscription) {
+        sendPushNotification(JSON.parse(users[to].pushSubscription), {
+          title: 'New Message',
+          body: `You have a new message from ${socket.username}`
         });
-        
-        try {
-          // Store the message in the recipient's database
-          await recipientPool.query(
-            'INSERT INTO messages (sender, receiver, message) VALUES ($1, $2, $3)', 
-            [socket.username, to, msg]
-          );
-          console.log(`Message from ${socket.username} to ${to} saved to recipient's database`);
-        } catch (err) {
-          console.error('Error saving message to recipient database:', err);
-        } finally {
-          recipientPool.end();
+      }
+    }
+    // Emit back to sender for UI update
+    socket.emit('chat message', message);
+
+    // Cross-database messaging
+    (async () => {
+      try {
+        const recipientExternalResult = await personalPool.query(
+          'SELECT * FROM external_databases WHERE username = $1', 
+          [to]
+        );
+        if (recipientExternalResult.rows.length > 0) {
+          const recipientDB = recipientExternalResult.rows[0];
+          const recipientPool = new Pool({
+            connectionString: recipientDB.database_url,
+            ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+          });
+          try {
+            await recipientPool.query(
+              'INSERT INTO messages (sender, receiver, message) VALUES ($1, $2, $3)', 
+              [socket.username, to, encryptedMessage]
+            );
+            console.log(`Message from ${socket.username} to ${to} saved to recipient's database`);
+          } catch (err) {
+            console.error('Error saving message to recipient database:', err);
+          } finally {
+            recipientPool.end();
+          }
         }
+      } catch (err) {
+        console.error('Error in cross-database messaging:', err);
       }
-    } catch (err) {
-      console.error('Error in cross-database messaging:', err);
-    }
-  })();
-});
-
-// Similarly update the file message handler
-socket.on('file message', ({ to, fileUrl, name, type, size, transcription }) => {
-  if (!socket.username) return;
-  const now = new Date();
-  const message = {
-    from: socket.username,
-    fileUrl,
-    name,
-    type,
-    size,
-    to,
-    timestamp: formatTime(now),
-    dayLabel: formatDayLabel(now),
-    messageId: generateMessageId(),
-    recorded: true
-  };
-
-  
-  const encryptedFileMessage = encryptData(message);
-
-  // Save to sender's database
-  saveFileMessage(socket.username, to, fileUrl, name, type, size);
-
-
-  // Send to recipient if online
-  if (users[to] && users[to].online) {
-    io.to(users[to].socketId).emit('file message', message);
-  }
-  socket.emit('file message', message);
-
-
-  // Cross-database file message handling - DON'T emit a second time to sender
-  (async () => {
-    try {
-      // Check if recipient is external
-      const recipientExternalResult = await personalPool.query(
-        'SELECT * FROM external_databases WHERE username = $1', 
-        [to]
-      );
-      
-      // If recipient is external, save to their database
-      if (recipientExternalResult.rows.length > 0) {
-        const recipientDB = recipientExternalResult.rows[0];
-        saveMessageToExternalDB(recipientDB.database_url, socket.username, to, null, { fileUrl, name, type, size });
-      }
-    } catch (err) {
-      console.error('Error in cross-database file messaging:', err);
-    }
-  })();
-});
-
-// Helper function to save messages to external DBs without duplicating events
-async function saveMessageToExternalDB(databaseUrl, sender, receiver, msg, fileData) {
-  const extPool = new Pool({
-    connectionString: databaseUrl,
-    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+    })();
   });
-  
-  try {
-    if (fileData) {
-      const query = `
-        INSERT INTO messages (sender, receiver, message, file_url, file_name, file_type, file_size)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
-      `;
-      const placeholderMessage = 'File attachment';
-      await extPool.query(query, [sender, receiver, placeholderMessage, fileData.fileUrl, fileData.name, fileData.type, fileData.size]);
-    } else {
-      await extPool.query('INSERT INTO messages (sender, receiver, message) VALUES ($1, $2, $3)', [sender, receiver, msg]);
-    }
-  } catch (err) {
-    console.error('Error inserting message into external DB:', err);
-  } finally {
-    extPool.end();
-  }
-}
+
+  // --- File Message Handler (single handler) ---
   socket.on('file message', ({ to, fileUrl, name, type, size, transcription }) => {
     if (!socket.username) return;
     const now = new Date();
@@ -791,37 +711,41 @@ async function saveMessageToExternalDB(databaseUrl, sender, receiver, msg, fileD
       recorded: true
     };
 
-    saveFileMessage(socket.username, to, fileUrl, name, type, size);
+    // Encrypt the full file message before saving
+    const encryptedFileMessage = encryptData(message);
+
+    // Save the encrypted file message to sender's database
+    saveFileMessage(socket.username, to, encryptedFileMessage);
+
+    // Immediately emit the file message to recipient if online
     if (users[to] && users[to].online) {
       io.to(users[to].socketId).emit('file message', message);
     }
+    // Emit to sender once for UI update
     socket.emit('file message', message);
 
+    // Cross-database file message handling for external users
     (async () => {
       try {
-        const extLinksSender = await personalPool.query('SELECT * FROM external_databases WHERE username = $1', [socket.username]);
-        for (const link of extLinksSender.rows) {
-          const extUser = await GeneralUser.findOne({ authentificator: link.authentificator }).exec();
-          if (extUser && extUser.username === to) {
-            await saveMessageExternal(link.database_url, socket.username, to, null, { fileUrl, name, type, size });
-          }
-        }
-        const extLinksReceiver = await personalPool.query('SELECT * FROM external_databases WHERE username = $1', [to]);
-        for (const link of extLinksReceiver.rows) {
-          const extUser = await GeneralUser.findOne({ authentificator: link.authentificator }).exec();
-          if (extUser && extUser.username === socket.username) {
-            await saveMessageExternal(link.database_url, socket.username, to, null, { fileUrl, name, type, size });
-          }
+        const recipientExternalResult = await personalPool.query(
+          'SELECT * FROM external_databases WHERE username = $1', 
+          [to]
+        );
+        if (recipientExternalResult.rows.length > 0) {
+          const recipientDB = recipientExternalResult.rows[0];
+          saveMessageToExternalDB(recipientDB.database_url, socket.username, to, null, { fileUrl, name, type, size });
         }
       } catch (err) {
-        console.error('Error saving external file message:', err);
+        console.error('Error in cross-database file messaging:', err);
       }
     })();
   });
 
+  // --- Load Messages (decrypt messages before sending to client) ---
   socket.on('load messages', ({ user }) => {
     if (socket.username && user) {
-      loadPrivateMessageHistory(socket.username, user, (messages) => {
+      loadPrivateMessageHistory(socket.username, user, (encryptedMessages) => {
+        const messages = encryptedMessages.map((encryptedMsg) => decryptData(encryptedMsg));
         socket.emit('chat history', messages);
       });
     } else {
@@ -851,6 +775,7 @@ async function saveMessageToExternalDB(databaseUrl, sender, receiver, msg, fileD
     }
     console.log('A user disconnected');
   });
+
 
   socket.on('setup password', async ({ username, password }) => {
     try {
@@ -916,15 +841,25 @@ function saveMessage(sender, receiver, message) {
   });
 }
 
-function saveFileMessage(sender, receiver, fileUrl, name, type, size) {
-  const query = `
-    INSERT INTO messages (sender, receiver, message, file_url, file_name, file_type, file_size)
-    VALUES ($1, $2, $3, $4, $5, $6, $7)
-  `;
-  const placeholderMessage = 'File attachment';
-  personalPool.query(query, [sender, receiver, placeholderMessage, fileUrl, name, type, size], (err) => {
-    if (err) console.error('Error saving file message:', err);
-  });
+function saveMessage(sender, receiver, encryptedMessage) {
+  personalPool.query(
+    'INSERT INTO messages (sender, receiver, message) VALUES ($1, $2, $3)', 
+    [sender, receiver, encryptedMessage],
+    (err) => {
+      if (err) console.error('Error saving message:', err);
+    }
+  );
+}
+
+function saveFileMessage(sender, receiver, encryptedFileMessage) {
+  // Save the encrypted file message in the "message" column
+  personalPool.query(
+    'INSERT INTO messages (sender, receiver, message) VALUES ($1, $2, $3)',
+    [sender, receiver, encryptedFileMessage],
+    (err) => {
+      if (err) console.error('Error saving file message:', err);
+    }
+  );
 }
 
 function loadPrivateMessageHistory(user1, user2, callback) {
@@ -933,7 +868,7 @@ function loadPrivateMessageHistory(user1, user2, callback) {
     return;
   }
   const query = `
-    SELECT sender, receiver, message, file_url, file_name, file_type, file_size, timestamp
+    SELECT message
     FROM messages
     WHERE (sender = $1 AND receiver = $2) OR (sender = $2 AND receiver = $1)
     ORDER BY timestamp ASC
@@ -943,21 +878,8 @@ function loadPrivateMessageHistory(user1, user2, callback) {
       console.error('Error loading message history:', err);
       callback([]);
     } else {
-      const messages = result.rows.map(row => {
-        const isFileMessage = row.file_url && row.file_name;
-        return {
-          from: row.sender,
-          to: row.receiver,
-          msg: isFileMessage ? 'File attachment' : row.message,
-          fileUrl: row.file_url,
-          fileName: row.file_name,
-          fileType: row.file_type,
-          fileSize: row.file_size,
-          timestamp: formatTime(row.timestamp),
-          dayLabel: formatDayLabel(row.timestamp),
-          isFileMessage: isFileMessage
-        };
-      });
+      // Return the encrypted message strings to be decrypted on the client side
+      const messages = result.rows.map(row => row.message);
       callback(messages);
     }
   });
