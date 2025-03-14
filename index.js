@@ -996,80 +996,76 @@ function loadPrivateMessageHistory(user1, user2, callback) {
     return;
   }
   
-  try {
-    // Get the user's private key for decryption
-    const userKeyQuery = await personalPool.query(
-      'SELECT private_key FROM users WHERE username = $1',
-      [user1]
-    );
-    
-    if (userKeyQuery.rows.length === 0 || !userKeyQuery.rows[0].private_key) {
-      console.error('Could not find private key for user:', user1);
-      callback([]);
-      return;
-    }
-    
-    const privateKey = userKeyQuery.rows[0].private_key;
-    
-    const query = `
-      SELECT sender, receiver, message, file_url, file_name, file_type, file_size, timestamp, is_encrypted
-      FROM messages
-      WHERE (sender = $1 AND receiver = $2) OR (sender = $2 AND receiver = $1)
-      ORDER BY timestamp ASC
-    `;
-    
-    personalPool.query(query, [user1, user2], (err, result) => {
-      if (err) {
-        console.error('Error loading message history:', err);
+  // Get the user's private key for decryption
+  personalPool.query(
+    'SELECT private_key FROM users WHERE username = $1',
+    [user1],
+    (keyErr, keyResult) => {
+      if (keyErr || keyResult.rows.length === 0 || !keyResult.rows[0].private_key) {
+        console.error('Could not find private key for user:', user1);
         callback([]);
-      } else {
-        const messages = result.rows.map(row => {
-          const isFileMessage = row.file_url && row.file_name;
-          
-          // Decrypt message content if it's encrypted
-          let decryptedMessage = row.message;
-          let decryptedFileUrl = row.file_url;
-          let decryptedFileName = row.file_name;
-          let decryptedFileType = row.file_type;
-          
-          if (row.is_encrypted) {
-            try {
-              if (!isFileMessage) {
-                decryptedMessage = decryptMessage(privateKey, row.message);
-              }
-              
-              if (isFileMessage) {
-                if (row.file_url) decryptedFileUrl = decryptMessage(privateKey, row.file_url);
-                if (row.file_name) decryptedFileName = decryptMessage(privateKey, row.file_name);
-                if (row.file_type) decryptedFileType = decryptMessage(privateKey, row.file_type);
-              }
-            } catch (error) {
-              console.error('Error decrypting message:', error);
-              // Fall back to encrypted content if decryption fails
-            }
-          }
-          
-          return {
-            from: row.sender,
-            to: row.receiver,
-            msg: isFileMessage ? 'File attachment' : decryptedMessage,
-            fileUrl: decryptedFileUrl,
-            name: decryptedFileName,
-            type: decryptedFileType,
-            fileSize: row.file_size,
-            timestamp: formatTime(row.timestamp),
-            dayLabel: formatDayLabel(row.timestamp),
-            messageId: generateMessageId(),
-            isFileMessage: isFileMessage
-          };
-        });
-        callback(messages);
+        return;
       }
-    });
-  } catch (error) {
-    console.error('Error in message history decryption:', error);
-    callback([]);
-  }
+      
+      const privateKey = keyResult.rows[0].private_key;
+      
+      const query = `
+        SELECT sender, receiver, message, file_url, file_name, file_type, file_size, timestamp, is_encrypted
+        FROM messages
+        WHERE (sender = $1 AND receiver = $2) OR (sender = $2 AND receiver = $1)
+        ORDER BY timestamp ASC
+      `;
+      
+      personalPool.query(query, [user1, user2], (err, result) => {
+        if (err) {
+          console.error('Error loading message history:', err);
+          callback([]);
+        } else {
+          const messages = result.rows.map(row => {
+            const isFileMessage = row.file_url && row.file_name;
+            
+            // Decrypt message content if it's encrypted
+            let decryptedMessage = row.message;
+            let decryptedFileUrl = row.file_url;
+            let decryptedFileName = row.file_name;
+            let decryptedFileType = row.file_type;
+            
+            if (row.is_encrypted) {
+              try {
+                if (!isFileMessage) {
+                  decryptedMessage = decryptMessage(privateKey, row.message);
+                }
+                
+                if (isFileMessage) {
+                  if (row.file_url) decryptedFileUrl = decryptMessage(privateKey, row.file_url);
+                  if (row.file_name) decryptedFileName = decryptMessage(privateKey, row.file_name);
+                  if (row.file_type) decryptedFileType = decryptMessage(privateKey, row.file_type);
+                }
+              } catch (error) {
+                console.error('Error decrypting message:', error);
+                // Fall back to encrypted content if decryption fails
+              }
+            }
+            
+            return {
+              from: row.sender,
+              to: row.receiver,
+              msg: isFileMessage ? 'File attachment' : decryptedMessage,
+              fileUrl: decryptedFileUrl,
+              name: decryptedFileName,
+              type: decryptedFileType,
+              size: row.file_size,
+              timestamp: formatTime(row.timestamp),
+              dayLabel: formatDayLabel(row.timestamp),
+              messageId: generateMessageId(),
+              isFileMessage: isFileMessage
+            };
+          });
+          callback(messages);
+        }
+      });
+    }
+  );
 }
 
 function formatDate(date) {
