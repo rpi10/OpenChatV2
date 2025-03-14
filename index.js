@@ -307,7 +307,7 @@ async function registerGeneralUser(username, password) {
 // ----------------------------
 // New Endpoint to Link External Databases (Bidirectional Insertion)
 // ----------------------------
-// When a user (e.g. Alice) submits another user's authenticator (e.g. Bob’s),
+// When a user (e.g. Alice) submits another user's authenticator (e.g. Bob's),
 //   - Step 1: Insert a record into the central external_databases for the current user (Alice)
 //             using her own username as owner and storing Bob's authenticator and Bob's database URL.
 //   - Step 2: Retrieve Alice's general record.
@@ -869,8 +869,7 @@ async function loginUser(socket, username) {
   socket.emit('login success', { username, authentificator });
   
   loadCombinedUsers(socket);
-  
-  
+}
 
 function saveMessage(sender, receiver, message) {
   personalPool.query('INSERT INTO messages (sender, receiver, message) VALUES ($1, $2, $3)', [sender, receiver, message], (err) => {
