@@ -743,48 +743,7 @@ async function saveMessageToExternalDB(databaseUrl, sender, receiver, msg, fileD
     extPool.end();
   }
 }
-  socket.on('file message', ({ to, fileUrl, name, type, size, transcription }) => {
-    if (!socket.username) return;
-    const now = new Date();
-    const message = {
-      from: socket.username,
-      fileUrl,
-      name,
-      type,
-      size,
-      to,
-      timestamp: formatTime(now),
-      dayLabel: formatDayLabel(now),
-      messageId: generateMessageId(),
-      recorded: true
-    };
 
-    saveFileMessage(socket.username, to, fileUrl, name, type, size);
-    if (users[to] && users[to].online) {
-      io.to(users[to].socketId).emit('file message', message);
-    }
-
-    (async () => {
-      try {
-        const extLinksSender = await personalPool.query('SELECT * FROM external_databases WHERE username = $1', [socket.username]);
-        for (const link of extLinksSender.rows) {
-          const extUser = await GeneralUser.findOne({ authentificator: link.authentificator }).exec();
-          if (extUser && extUser.username === to) {
-            await saveMessageExternal(link.database_url, socket.username, to, null, { fileUrl, name, type, size });
-          }
-        }
-        const extLinksReceiver = await personalPool.query('SELECT * FROM external_databases WHERE username = $1', [to]);
-        for (const link of extLinksReceiver.rows) {
-          const extUser = await GeneralUser.findOne({ authentificator: link.authentificator }).exec();
-          if (extUser && extUser.username === socket.username) {
-            await saveMessageExternal(link.database_url, socket.username, to, null, { fileUrl, name, type, size });
-          }
-        }
-      } catch (err) {
-        console.error('Error saving external file message:', err);
-      }
-    })();
-  });
 
   socket.on('load messages', ({ user }) => {
     if (socket.username && user) {
