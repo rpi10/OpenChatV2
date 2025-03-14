@@ -530,11 +530,61 @@ body {
   margin-top: 10px;
 }
 
-/* Responsive Mobile Design */
 @media (max-width: 768px) {
-  body {
-    position: relative;
+    .modal-content {
+      max-width: 100%;
+      max-height: 80vh;
+      margin: auto;
+    }
+  
+    .modal-actions {
+      top: 10px;
+      padding: 0 10px;
+    }
+  
+    .close-modal {
+      font-size: 28px;
+      width: 32px;
+      height: 32px;
+    }
+  
+    .download-modal {
+      padding: 6px 12px;
+      font-size: 14px;
+    }
   }
+  
+  .close {
+    position: absolute;
+    top: 15px;
+    right: 25px;
+    color: white;
+    font-size: 35px;
+    font-weight: bold;
+    cursor: pointer;
+  }
+  
+  .download-button {
+    position: absolute;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: white;
+    color: black;
+    padding: 10px 15px;
+    text-decoration: none;
+    font-size: 16px;
+    border-radius: 5px;
+  }
+  
+  /* Responsive adjustments for mobile – sliding layout */
+  @media (max-width: 768px) {
+    body {
+      position: relative;
+      width: 100vw;
+    }
+
+
   
   #sidebar {
     position: absolute;
