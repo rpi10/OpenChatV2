@@ -565,12 +565,33 @@ const { modal, modalImg, closeBtn, downloadBtn } = createImageModal();
 function showImageModal(imgElement) {
   modal.style.display = 'flex';
   modalImg.src = imgElement.src;
-  downloadBtn.onclick = () => {
-    const link = document.createElement('a');
-    link.href = imgElement.src;
-    link.download = imgElement.alt || 'image';
-    link.click();
+  
+  downloadBtn.onclick = async () => {
+    try {
+      // Fetch the image data
+      const response = await fetch(imgElement.src);
+      const blob = await response.blob();
+      
+      // Create a blob URL for the image data
+      const blobUrl = URL.createObjectURL(blob);
+      
+      // Create a temporary link element
+      const link = document.createElement('a');
+      link.href = blobUrl;
+      link.download = imgElement.alt || 'image';
+      
+      // Append to the document, click it, and remove it
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      
+      // Clean up the blob URL
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 100);
+    } catch (error) {
+      console.error('Error downloading image:', error);
+    }
   };
+  
   document.body.style.overflow = 'hidden';
 }
 
@@ -585,7 +606,6 @@ modal.onclick = (e) => {
     document.body.style.overflow = '';
   }
 };
-
 // Recording and sending audio
 recordButton.addEventListener('mousedown', async () => {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
