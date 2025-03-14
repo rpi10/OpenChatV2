@@ -818,7 +818,7 @@ async function saveMessageToExternalDB(databaseUrl, sender, receiver, msg, fileD
     } catch (err) {
       console.error('Error saving push subscription:', err);
     }
-  });
+
 
   async function sendPushNotification(subscription, message) {
     try {
