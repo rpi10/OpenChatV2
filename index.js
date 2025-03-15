@@ -742,13 +742,14 @@ io.on('connection', (socket) => {
   socket.on('chat message', async ({ to, msg }) => {
     if (!socket.username) return;
     const now = new Date();
+    const messageId = generateMessageId();
     const message = {
       from: socket.username,
       msg,
       to,
       timestamp: formatTime(now),
       dayLabel: formatDayLabel(now),
-      messageId: generateMessageId()
+      messageId
     };
 
     try {
@@ -775,14 +776,23 @@ io.on('connection', (socket) => {
         }
       }
       
-      // Encrypt message if we have recipient's public key
-      let encryptedMsg = msg;
-      if (recipientPublicKey) {
-        encryptedMsg = encryptMessage(recipientPublicKey, msg);
-      }
+      // Get sender's public key for self-encryption
+      const senderQuery = await personalPool.query(
+        'SELECT public_key FROM users WHERE username = $1',
+        [socket.username]
+      );
       
-      // Save message to local database (always use original message for sender)
-      saveMessage(socket.username, to, encryptedMsg, !!recipientPublicKey);
+      const senderPublicKey = senderQuery.rows.length > 0 ? senderQuery.rows[0].public_key : null;
+      
+      // For recipient DB: encrypt with recipient's key
+      let recipientEncryptedMsg = recipientPublicKey ? encryptMessage(recipientPublicKey, msg) : msg;
+      
+      // For sender DB: either store unencrypted or encrypt with sender's own key
+      let senderStoredMsg = msg;
+      const isEncrypted = false; // Don't mark self-messages as encrypted for simpler retrieval
+      
+      // Save message to local database (use unencrypted for sender)
+      saveMessage(socket.username, to, senderStoredMsg, isEncrypted);
       
       // Send to recipient if online
       if (users[to] && users[to].online) {
@@ -811,7 +821,7 @@ io.on('connection', (socket) => {
           recipientDB.database_url, 
           socket.username, 
           to, 
-          encryptedMsg, 
+          recipientEncryptedMsg, 
           null,
           !!recipientPublicKey
         );
@@ -824,6 +834,7 @@ io.on('connection', (socket) => {
   socket.on('file message', async ({ to, fileUrl, name, type, size, transcription }) => {
     if (!socket.username) return;
     const now = new Date();
+    const messageId = generateMessageId();
     const message = {
       from: socket.username,
       fileUrl,
@@ -833,8 +844,8 @@ io.on('connection', (socket) => {
       to,
       timestamp: formatTime(now),
       dayLabel: formatDayLabel(now),
-      messageId: generateMessageId(),
-      recorded: true
+      messageId,
+      isFileMessage: true
     };
 
     try {
@@ -861,19 +872,16 @@ io.on('connection', (socket) => {
         }
       }
       
-      // Encrypt file info if we have recipient's public key
-      let encryptedUrl = fileUrl;
-      let encryptedName = name;
-      let encryptedType = type;
+      // For recipient: encrypt with recipient's key if available
+      let recipientEncryptedUrl = recipientPublicKey ? encryptMessage(recipientPublicKey, fileUrl) : fileUrl;
+      let recipientEncryptedName = recipientPublicKey ? encryptMessage(recipientPublicKey, name) : name;
+      let recipientEncryptedType = recipientPublicKey ? encryptMessage(recipientPublicKey, type) : type;
       
-      if (recipientPublicKey) {
-        encryptedUrl = encryptMessage(recipientPublicKey, fileUrl);
-        encryptedName = encryptMessage(recipientPublicKey, name);
-        encryptedType = encryptMessage(recipientPublicKey, type);
-      }
+      // For sender: store unencrypted
+      const isEncrypted = false; // Don't mark self-messages as encrypted
       
-      // Save to sender's database
-      saveFileMessage(socket.username, to, encryptedUrl, encryptedName, encryptedType, size, !!recipientPublicKey);
+      // Save to sender's database (unencrypted)
+      saveFileMessage(socket.username, to, fileUrl, name, type, size, isEncrypted);
       
       // Send to recipient if online
       if (users[to] && users[to].online) {
@@ -881,7 +889,7 @@ io.on('connection', (socket) => {
         io.to(users[to].socketId).emit('notification', `New file from ${socket.username}`);
       }
       
-      // Send back to sender for UI update
+      // Send back to sender for UI update (just once)
       socket.emit('file message', { ...message, _preventDuplicate: true });
       
       // Cross-database file message handling
@@ -897,7 +905,12 @@ io.on('connection', (socket) => {
           socket.username, 
           to, 
           null, 
-          { fileUrl: encryptedUrl, name: encryptedName, type: encryptedType, size }, 
+          { 
+            fileUrl: recipientEncryptedUrl, 
+            name: recipientEncryptedName, 
+            type: recipientEncryptedType, 
+            size 
+          },
           !!recipientPublicKey
         );
       }
@@ -1044,7 +1057,7 @@ function saveFileMessage(sender, receiver, fileUrl, name, type, size, isEncrypte
   );
 }
 
-// Improved loadPrivateMessageHistory with better error handling
+// Updated loadPrivateMessageHistory function
 function loadPrivateMessageHistory(user1, user2, callback) {
   if (!user2) {
     callback([]);
@@ -1099,10 +1112,17 @@ function loadPrivateMessageHistory(user1, user2, callback) {
           const messages = result.rows.map(row => {
             const isFileMessage = row.file_url && row.file_name;
             
+            // Only decrypt messages FROM the other user, not messages FROM ourselves
+            // Messages from us TO someone else should already be in plaintext in our DB
+            const isSentByMe = row.sender === user1;
+            
             // Decide if we should try to decrypt based on:
             // 1. If is_encrypted exists and is true
             // 2. If we have a private key
-            const shouldDecrypt = privateKey && (isEncryptedExists ? row.is_encrypted : false);
+            // 3. If the message is from the other user (not from us)
+            const shouldDecrypt = privateKey && 
+                                 (isEncryptedExists ? row.is_encrypted : false) && 
+                                 !isSentByMe;
             
             let finalMessage = row.message;
             let finalFileUrl = row.file_url;
