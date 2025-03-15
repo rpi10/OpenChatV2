@@ -889,10 +889,10 @@ io.on('connection', (socket) => {
     const messageId = generateMessageId();
     const message = {
       from: socket.username,
-      fileUrl,
-      name,
-      type,
-      size,
+      fileUrl: fileUrl,
+      fileName: name,
+      fileType: type,
+      fileSize: size,
       to,
       timestamp: formatTime(now),
       dayLabel: formatDayLabel(now),
@@ -955,7 +955,7 @@ io.on('connection', (socket) => {
       }
       
       // Send back to sender for UI update (just once)
-      socket.emit('file message', { ...message, _preventDuplicate: true });
+      socket.emit('file message', message);
       
       // Cross-database file message handling
       const recipientExternalResult = await personalPool.query(
@@ -1151,7 +1151,7 @@ function saveFileMessage(sender, receiver, fileUrl, name, type, size, isEncrypte
   });
 }
 
-// Updated loadPrivateMessageHistory function
+// Update loadPrivateMessageHistory to match the working file logic
 function loadPrivateMessageHistory(user1, user2, callback) {
   if (!user2) {
     callback([]);
@@ -1205,6 +1205,7 @@ function loadPrivateMessageHistory(user1, user2, callback) {
           }
           
           const messages = result.rows.map(row => {
+            // Important: Use the same isFileMessage detection logic as the working file
             const isFileMessage = row.file_url && row.file_name;
             
             // Determine sender and receiver
@@ -1251,18 +1252,19 @@ function loadPrivateMessageHistory(user1, user2, callback) {
               }
             }
             
+            // Use the exact same property names as in the working file
             return {
               from: row.sender,
               to: row.receiver,
               msg: isFileMessage ? 'File attachment' : finalMessage,
               fileUrl: finalFileUrl,
-              name: finalFileName,
-              type: finalFileType,
-              size: row.file_size,
+              fileName: finalFileName, // Note: Changed from name to fileName
+              fileType: finalFileType, // Note: Changed from type to fileType
+              fileSize: row.file_size, // Note: Changed from size to fileSize
               timestamp: formatTime(row.timestamp),
               dayLabel: formatDayLabel(row.timestamp),
               messageId: generateMessageId(),
-              isFileMessage: isFileMessage
+              isFileMessage: isFileMessage // This is critical for file display
             };
           });
           
@@ -1272,7 +1274,42 @@ function loadPrivateMessageHistory(user1, user2, callback) {
     }
   );
   
-  // Fallback function unchanged
+  // Fallback function to match working file
+  function fallbackToUnencrypted() {
+    const query = `
+      SELECT sender, receiver, message, file_url, file_name, file_type, file_size, timestamp
+      FROM messages
+      WHERE (sender = $1 AND receiver = $2) OR (sender = $2 AND receiver = $1)
+      ORDER BY timestamp ASC
+    `;
+    
+    personalPool.query(query, [user1, user2], (err, result) => {
+      if (err) {
+        console.error('Error in fallback message loading:', err);
+        callback([]);
+        return;
+      }
+      
+      const messages = result.rows.map(row => {
+        const isFileMessage = row.file_url && row.file_name;
+        return {
+          from: row.sender,
+          to: row.receiver,
+          msg: isFileMessage ? 'File attachment' : row.message,
+          fileUrl: row.file_url,
+          fileName: row.file_name, // Match working file property names
+          fileType: row.file_type,
+          fileSize: row.file_size,
+          timestamp: formatTime(row.timestamp),
+          dayLabel: formatDayLabel(row.timestamp),
+          messageId: generateMessageId(),
+          isFileMessage: isFileMessage
+        };
+      });
+      
+      callback(messages);
+    });
+  }
 }
 
 function formatDate(date) {
