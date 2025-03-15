@@ -356,7 +356,7 @@ async function registerGeneralUser(username, password) {
   }
 }
 
-// Add E2E encryption utility functions
+// Replace the encryption utility functions with more robust versions
 function generateKeyPair() {
   return crypto.generateKeyPairSync('rsa', {
     modulusLength: 2048,
@@ -372,26 +372,29 @@ function generateKeyPair() {
 }
 
 function encryptMessage(publicKey, message) {
-  if (!message) return null;
+  if (!message || !publicKey) return message;
   try {
-    // Encrypt with recipient's public key
     return crypto.publicEncrypt(
       {
         key: publicKey,
         padding: crypto.constants.RSA_PKCS1_OAEP_PADDING
       },
-      Buffer.from(message)
+      Buffer.from(String(message))
     ).toString('base64');
   } catch (err) {
     console.error('Encryption error:', err);
-    return message; // Fallback to unencrypted if encryption fails
+    return message; // Return original message if encryption fails
   }
 }
 
 function decryptMessage(privateKey, encryptedMessage) {
-  if (!encryptedMessage) return null;
+  if (!encryptedMessage || !privateKey) return encryptedMessage;
   try {
-    // Decrypt with user's private key
+    // Check if the message is actually encrypted (should be base64)
+    if (!/^[A-Za-z0-9+/=]+$/.test(encryptedMessage)) {
+      return encryptedMessage; // Not a base64 string, return as is
+    }
+    
     return crypto.privateDecrypt(
       {
         key: privateKey,
@@ -751,37 +754,37 @@ io.on('connection', (socket) => {
     try {
       // Get recipient's public key for encryption
       let recipientPublicKey = null;
-      
-      // Check if recipient is an external user
-      const externalUserQuery = await personalPool.query(
-        'SELECT public_key FROM external_databases WHERE username = $1',
+      const userQuery = await personalPool.query(
+        'SELECT public_key FROM users WHERE username = $1',
         [to]
       );
       
-      if (externalUserQuery.rows.length > 0 && externalUserQuery.rows[0].public_key) {
-        recipientPublicKey = externalUserQuery.rows[0].public_key;
-      } else {
-        // Check if it's a local user
-        const localUserQuery = await personalPool.query(
-          'SELECT public_key FROM users WHERE username = $1',
+      if (userQuery.rows.length > 0 && userQuery.rows[0].public_key) {
+        recipientPublicKey = userQuery.rows[0].public_key;
+      }
+      
+      // Also check external database users
+      if (!recipientPublicKey) {
+        const externalUserQuery = await personalPool.query(
+          'SELECT public_key FROM external_databases WHERE username = $1',
           [to]
         );
         
-        if (localUserQuery.rows.length > 0 && localUserQuery.rows[0].public_key) {
-          recipientPublicKey = localUserQuery.rows[0].public_key;
+        if (externalUserQuery.rows.length > 0 && externalUserQuery.rows[0].public_key) {
+          recipientPublicKey = externalUserQuery.rows[0].public_key;
         }
       }
       
-      // Encrypt message if we have the recipient's public key
+      // Encrypt message if we have recipient's public key
       let encryptedMsg = msg;
       if (recipientPublicKey) {
         encryptedMsg = encryptMessage(recipientPublicKey, msg);
       }
       
-      // Save encrypted message to local database
-      saveMessage(socket.username, to, encryptedMsg, recipientPublicKey !== null);
+      // Save message to local database (always use original message for sender)
+      saveMessage(socket.username, to, encryptedMsg, !!recipientPublicKey);
       
-      // Send original message to recipient if they are online
+      // Send to recipient if online
       if (users[to] && users[to].online) {
         io.to(users[to].socketId).emit('chat message', message);
         io.to(users[to].socketId).emit('notification', `New message from ${socket.username}`);
@@ -802,13 +805,19 @@ io.on('connection', (socket) => {
         [to]
       );
       
-      // If recipient is found in external_databases, send the message to their database
       if (recipientExternalResult.rows.length > 0) {
         const recipientDB = recipientExternalResult.rows[0];
-        saveMessageToExternalDB(recipientDB.database_url, socket.username, to, encryptedMsg, null, recipientPublicKey !== null);
+        saveMessageToExternalDB(
+          recipientDB.database_url, 
+          socket.username, 
+          to, 
+          encryptedMsg, 
+          null,
+          !!recipientPublicKey
+        );
       }
     } catch (err) {
-      console.error('Error in encrypted chat message:', err);
+      console.error('Error in chat message:', err);
     }
   });
 
@@ -831,42 +840,42 @@ io.on('connection', (socket) => {
     try {
       // Get recipient's public key for encryption
       let recipientPublicKey = null;
-      
-      // Check if recipient is an external user
-      const externalUserQuery = await personalPool.query(
-        'SELECT public_key FROM external_databases WHERE username = $1',
+      const userQuery = await personalPool.query(
+        'SELECT public_key FROM users WHERE username = $1',
         [to]
       );
       
-      if (externalUserQuery.rows.length > 0 && externalUserQuery.rows[0].public_key) {
-        recipientPublicKey = externalUserQuery.rows[0].public_key;
-      } else {
-        // Check if it's a local user
-        const localUserQuery = await personalPool.query(
-          'SELECT public_key FROM users WHERE username = $1',
+      if (userQuery.rows.length > 0 && userQuery.rows[0].public_key) {
+        recipientPublicKey = userQuery.rows[0].public_key;
+      }
+      
+      // Also check external database users
+      if (!recipientPublicKey) {
+        const externalUserQuery = await personalPool.query(
+          'SELECT public_key FROM external_databases WHERE username = $1',
           [to]
         );
         
-        if (localUserQuery.rows.length > 0 && localUserQuery.rows[0].public_key) {
-          recipientPublicKey = localUserQuery.rows[0].public_key;
+        if (externalUserQuery.rows.length > 0 && externalUserQuery.rows[0].public_key) {
+          recipientPublicKey = externalUserQuery.rows[0].public_key;
         }
       }
       
       // Encrypt file info if we have recipient's public key
+      let encryptedUrl = fileUrl;
       let encryptedName = name;
       let encryptedType = type;
-      let encryptedUrl = fileUrl;
       
       if (recipientPublicKey) {
+        encryptedUrl = encryptMessage(recipientPublicKey, fileUrl);
         encryptedName = encryptMessage(recipientPublicKey, name);
         encryptedType = encryptMessage(recipientPublicKey, type);
-        encryptedUrl = encryptMessage(recipientPublicKey, fileUrl);
       }
       
-      // Save encrypted file message to local database
-      saveFileMessage(socket.username, to, encryptedUrl, encryptedName, encryptedType, size, recipientPublicKey !== null);
+      // Save to sender's database
+      saveFileMessage(socket.username, to, encryptedUrl, encryptedName, encryptedType, size, !!recipientPublicKey);
       
-      // Send original message to recipient if they are online
+      // Send to recipient if online
       if (users[to] && users[to].online) {
         io.to(users[to].socketId).emit('file message', message);
         io.to(users[to].socketId).emit('notification', `New file from ${socket.username}`);
@@ -881,7 +890,6 @@ io.on('connection', (socket) => {
         [to]
       );
       
-      // If recipient is external, save to their database
       if (recipientExternalResult.rows.length > 0) {
         const recipientDB = recipientExternalResult.rows[0];
         saveMessageToExternalDB(
@@ -890,11 +898,11 @@ io.on('connection', (socket) => {
           to, 
           null, 
           { fileUrl: encryptedUrl, name: encryptedName, type: encryptedType, size }, 
-          recipientPublicKey !== null
+          !!recipientPublicKey
         );
       }
     } catch (err) {
-      console.error('Error in encrypted file message:', err);
+      console.error('Error in file message:', err);
     }
   });
 
@@ -1024,7 +1032,7 @@ function saveMessage(sender, receiver, message, isEncrypted = true) {
 function saveFileMessage(sender, receiver, fileUrl, name, type, size, isEncrypted = true) {
   const query = `
     INSERT INTO messages (sender, receiver, message, file_url, file_name, file_type, file_size, is_encrypted)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
   `;
   const placeholderMessage = 'File attachment';
   personalPool.query(
@@ -1036,6 +1044,7 @@ function saveFileMessage(sender, receiver, fileUrl, name, type, size, isEncrypte
   );
 }
 
+// Improved loadPrivateMessageHistory with better error handling
 function loadPrivateMessageHistory(user1, user2, callback) {
   if (!user2) {
     callback([]);
@@ -1047,59 +1056,83 @@ function loadPrivateMessageHistory(user1, user2, callback) {
     'SELECT private_key FROM users WHERE username = $1',
     [user1],
     (keyErr, keyResult) => {
-      if (keyErr || keyResult.rows.length === 0 || !keyResult.rows[0].private_key) {
-        console.error('Could not find private key for user:', user1);
-        callback([]);
+      if (keyErr) {
+        console.error('Error fetching private key:', keyErr);
+        fallbackToUnencrypted();
         return;
       }
       
-      const privateKey = keyResult.rows[0].private_key;
+      const privateKey = keyResult.rows.length > 0 ? keyResult.rows[0].private_key : null;
       
-      const query = `
-        SELECT sender, receiver, message, file_url, file_name, file_type, file_size, timestamp, is_encrypted
-        FROM messages
-        WHERE (sender = $1 AND receiver = $2) OR (sender = $2 AND receiver = $1)
-        ORDER BY timestamp ASC
-      `;
-      
-      personalPool.query(query, [user1, user2], (err, result) => {
-        if (err) {
-          console.error('Error loading message history:', err);
-          callback([]);
-        } else {
+      // Check if is_encrypted column exists
+      personalPool.query(`
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_schema='public' AND table_name='messages' AND column_name='is_encrypted'
+      `, (columnErr, columnResult) => {
+        if (columnErr) {
+          console.error('Error checking for is_encrypted column:', columnErr);
+          fallbackToUnencrypted();
+          return;
+        }
+        
+        const isEncryptedExists = columnResult.rows.length > 0;
+        
+        // Adjust query based on column existence
+        const query = isEncryptedExists ? 
+          `SELECT sender, receiver, message, file_url, file_name, file_type, file_size, timestamp, is_encrypted
+           FROM messages
+           WHERE (sender = $1 AND receiver = $2) OR (sender = $2 AND receiver = $1)
+           ORDER BY timestamp ASC` :
+          `SELECT sender, receiver, message, file_url, file_name, file_type, file_size, timestamp
+           FROM messages
+           WHERE (sender = $1 AND receiver = $2) OR (sender = $2 AND receiver = $1)
+           ORDER BY timestamp ASC`;
+        
+        personalPool.query(query, [user1, user2], (err, result) => {
+          if (err) {
+            console.error('Error loading message history:', err);
+            callback([]);
+            return;
+          }
+          
           const messages = result.rows.map(row => {
             const isFileMessage = row.file_url && row.file_name;
             
-            // Decrypt message content if it's encrypted
-            let decryptedMessage = row.message;
-            let decryptedFileUrl = row.file_url;
-            let decryptedFileName = row.file_name;
-            let decryptedFileType = row.file_type;
+            // Decide if we should try to decrypt based on:
+            // 1. If is_encrypted exists and is true
+            // 2. If we have a private key
+            const shouldDecrypt = privateKey && (isEncryptedExists ? row.is_encrypted : false);
             
-            if (row.is_encrypted) {
+            let finalMessage = row.message;
+            let finalFileUrl = row.file_url;
+            let finalFileName = row.file_name;
+            let finalFileType = row.file_type;
+            
+            if (shouldDecrypt) {
               try {
-                if (!isFileMessage) {
-                  decryptedMessage = decryptMessage(privateKey, row.message);
+                if (!isFileMessage && row.message) {
+                  finalMessage = decryptMessage(privateKey, row.message);
                 }
                 
                 if (isFileMessage) {
-                  if (row.file_url) decryptedFileUrl = decryptMessage(privateKey, row.file_url);
-                  if (row.file_name) decryptedFileName = decryptMessage(privateKey, row.file_name);
-                  if (row.file_type) decryptedFileType = decryptMessage(privateKey, row.file_type);
+                  if (row.file_url) finalFileUrl = decryptMessage(privateKey, row.file_url);
+                  if (row.file_name) finalFileName = decryptMessage(privateKey, row.file_name);
+                  if (row.file_type) finalFileType = decryptMessage(privateKey, row.file_type);
                 }
-              } catch (error) {
-                console.error('Error decrypting message:', error);
-                // Fall back to encrypted content if decryption fails
+              } catch (decryptError) {
+                console.error('Error decrypting message content:', decryptError);
+                // Keep the original values if decryption fails
               }
             }
             
             return {
               from: row.sender,
               to: row.receiver,
-              msg: isFileMessage ? 'File attachment' : decryptedMessage,
-              fileUrl: decryptedFileUrl,
-              name: decryptedFileName,
-              type: decryptedFileType,
+              msg: isFileMessage ? 'File attachment' : finalMessage,
+              fileUrl: finalFileUrl,
+              name: finalFileName,
+              type: finalFileType,
               size: row.file_size,
               timestamp: formatTime(row.timestamp),
               dayLabel: formatDayLabel(row.timestamp),
@@ -1107,11 +1140,49 @@ function loadPrivateMessageHistory(user1, user2, callback) {
               isFileMessage: isFileMessage
             };
           });
+          
           callback(messages);
-        }
+        });
       });
     }
   );
+  
+  // Fallback function for unencrypted messages
+  function fallbackToUnencrypted() {
+    const query = `
+      SELECT sender, receiver, message, file_url, file_name, file_type, file_size, timestamp
+      FROM messages
+      WHERE (sender = $1 AND receiver = $2) OR (sender = $2 AND receiver = $1)
+      ORDER BY timestamp ASC
+    `;
+    
+    personalPool.query(query, [user1, user2], (err, result) => {
+      if (err) {
+        console.error('Error in fallback message loading:', err);
+        callback([]);
+        return;
+      }
+      
+      const messages = result.rows.map(row => {
+        const isFileMessage = row.file_url && row.file_name;
+        return {
+          from: row.sender,
+          to: row.receiver,
+          msg: isFileMessage ? 'File attachment' : row.message,
+          fileUrl: row.file_url,
+          name: row.file_name,
+          type: row.file_type,
+          size: row.file_size,
+          timestamp: formatTime(row.timestamp),
+          dayLabel: formatDayLabel(row.timestamp),
+          messageId: generateMessageId(),
+          isFileMessage: isFileMessage
+        };
+      });
+      
+      callback(messages);
+    });
+  }
 }
 
 function formatDate(date) {
@@ -1142,6 +1213,64 @@ function formatDayLabel(date) {
 
 function generateMessageId() {
   return `${Date.now()}${Math.random().toString(36).substring(2, 9)}`;
+}
+
+// Updated saveMessageToExternalDB function
+async function saveMessageToExternalDB(databaseUrl, sender, receiver, msg, fileData, isEncrypted = false) {
+  if (!databaseUrl) {
+    console.error('Missing database URL for external message');
+    return;
+  }
+  
+  const extPool = new Pool({
+    connectionString: databaseUrl,
+    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+  });
+  
+  try {
+    // First check if schema is compatible with our current code
+    const schemaCheck = await extPool.query(`
+      SELECT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_name = 'messages'
+        AND column_name = 'is_encrypted'
+      ) as has_is_encrypted
+    `);
+    
+    const hasIsEncrypted = schemaCheck.rows[0]?.has_is_encrypted || false;
+    
+    if (fileData) {
+      // Construct the query based on schema compatibility
+      const query = hasIsEncrypted ?
+        `INSERT INTO messages (sender, receiver, message, file_url, file_name, file_type, file_size, is_encrypted)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)` :
+        `INSERT INTO messages (sender, receiver, message, file_url, file_name, file_type, file_size)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`;
+      
+      const placeholderMessage = 'File attachment';
+      const params = hasIsEncrypted ?
+        [sender, receiver, placeholderMessage, fileData.fileUrl, fileData.name, fileData.type, fileData.size, isEncrypted] :
+        [sender, receiver, placeholderMessage, fileData.fileUrl, fileData.name, fileData.type, fileData.size];
+      
+      await extPool.query(query, params);
+    } else if (msg) {
+      // Text message
+      const query = hasIsEncrypted ?
+        'INSERT INTO messages (sender, receiver, message, is_encrypted) VALUES ($1, $2, $3, $4)' :
+        'INSERT INTO messages (sender, receiver, message) VALUES ($1, $2, $3)';
+      
+      const params = hasIsEncrypted ?
+        [sender, receiver, msg, isEncrypted] :
+        [sender, receiver, msg];
+      
+      await extPool.query(query, params);
+    }
+  } catch (err) {
+    console.error('Error inserting message into external DB:', err);
+  } finally {
+    extPool.end().catch(err => console.error('Error closing external pool:', err));
+  }
 }
 
 // ----------------------------
