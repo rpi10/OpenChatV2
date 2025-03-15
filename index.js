@@ -1119,77 +1119,100 @@ io.on('connection', (socket) => {
         return;
       }
       
-      // Attempt to connect to the external database
-      const externalPool = new Pool({
-        connectionString: data.databaseUrl,
-        ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
-      });
+      // Store the user's database info in the local database first - this ensures at least one side of the link works
+      await personalPool.query(
+        'INSERT INTO external_databases (username, database_url, public_key) VALUES ($1, $2, $3)',
+        [data.username, data.databaseUrl, null] // We'll update public_key if we can connect
+      );
       
+      // Now try to connect to the external database to get public key and set up the reverse link
+      let extPublicKey = null;
       try {
-        // Verify connection by making a simple query
-        await externalPool.query('SELECT NOW()');
-        
-        // Get public key from external user - don't reference any columns that might not exist
-        // Instead, just check if the user exists and retrieve only the public_key
-        const externalUserResult = await externalPool.query(
-          'SELECT public_key FROM users WHERE username = $1',
-          [data.username]
-        );
-        
-        let publicKey = null;
-        if (externalUserResult.rows.length > 0) {
-          publicKey = externalUserResult.rows[0].public_key;
-        }
-        
-        // Store the external database info in the local database
-        await personalPool.query(
-          'INSERT INTO external_databases (username, database_url, public_key) VALUES ($1, $2, $3)',
-          [data.username, data.databaseUrl, publicKey]
-        );
-        
-        // Get just the necessary public key from local database
-        const myPublicKeyResult = await personalPool.query(
-          'SELECT public_key FROM users WHERE username = $1',
-          [socket.username]
-        );
-        
-        let myPublicKey = null;
-        if (myPublicKeyResult.rows.length > 0) {
-          myPublicKey = myPublicKeyResult.rows[0].public_key;
-        }
-        
-        // Add the local user to the remote database's external_databases table
-        // First check if the external_databases table exists in external database
-        const tableCheckResult = await externalPool.query(`
-          SELECT EXISTS (
-            SELECT 1
-            FROM information_schema.tables
-            WHERE table_name = 'external_databases'
-          ) as has_external_table
-        `);
-        
-        if (tableCheckResult.rows[0].has_external_table) {
-          // Table exists, proceed with insertion
-          await externalPool.query(
-            'INSERT INTO external_databases (username, database_url, public_key) VALUES ($1, $2, $3) ON CONFLICT (username) DO NOTHING',
-            [socket.username, process.env.DATABASE_URL, myPublicKey]
-          );
-        } else {
-          console.log(`External database for ${data.username} doesn't have external_databases table yet`);
-        }
-        
-        // Update users list for the current socket
-        updateUsersList(socket);
-        
-        socket.emit('link-response', { 
-          success: true, 
-          message: `Successfully linked with ${data.username}'s database!` 
+        // Attempt to connect to the external database
+        const externalPool = new Pool({
+          connectionString: data.databaseUrl,
+          ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
         });
         
-      } finally {
-        // Always close the external pool
-        await externalPool.end();
+        try {
+          // Verify connection by making a simple query
+          await externalPool.query('SELECT NOW()');
+          console.log(`Successfully connected to ${data.username}'s database`);
+          
+          // Get public key from external user - don't reference any columns that might not exist
+          try {
+            const externalUserResult = await externalPool.query(
+              'SELECT public_key FROM users WHERE username = $1',
+              [data.username]
+            );
+            
+            if (externalUserResult.rows.length > 0) {
+              extPublicKey = externalUserResult.rows[0].public_key;
+              console.log(`Successfully retrieved ${data.username}'s public key`);
+              
+              // Update the stored record with the retrieved public key
+              await personalPool.query(
+                'UPDATE external_databases SET public_key = $1 WHERE username = $2',
+                [extPublicKey, data.username]
+              );
+            } else {
+              console.log(`User ${data.username} not found in their database`);
+            }
+          } catch (keyError) {
+            console.error('Error retrieving target user public key:', keyError);
+          }
+          
+          // Try to set up the reverse link - first get our public key
+          try {
+            const myPublicKeyResult = await personalPool.query(
+              'SELECT public_key FROM users WHERE username = $1',
+              [socket.username]
+            );
+            
+            let myPublicKey = null;
+            if (myPublicKeyResult.rows.length > 0) {
+              myPublicKey = myPublicKeyResult.rows[0].public_key;
+            }
+            
+            // Check if external_databases table exists
+            const tableCheckResult = await externalPool.query(`
+              SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_name = 'external_databases'
+              ) as has_external_table
+            `);
+            
+            if (tableCheckResult.rows[0].has_external_table) {
+              // Try to insert our info into their external_databases table
+              await externalPool.query(
+                'INSERT INTO external_databases (username, database_url, public_key) VALUES ($1, $2, $3) ON CONFLICT (username) DO NOTHING',
+                [socket.username, process.env.DATABASE_URL, myPublicKey]
+              );
+              console.log(`Successfully added link to ${data.username}'s database`);
+            } else {
+              console.log(`External database for ${data.username} doesn't have external_databases table`);
+            }
+          } catch (linkError) {
+            console.error('Error connecting to or inserting into target database:', linkError);
+          }
+        } finally {
+          // Always close the external pool
+          await externalPool.end();
+        }
+      } catch (connectionError) {
+        console.error('Error connecting to external database:', connectionError);
+        // We don't fail the whole operation - we've already stored their info locally
       }
+      
+      // Update users list for the current socket
+      updateUsersList(socket);
+      
+      // Consider it a success if we at least stored their info locally
+      socket.emit('link-response', { 
+        success: true, 
+        message: `Successfully linked with ${data.username}'s database! ${extPublicKey ? 'Full two-way connection established.' : 'One-way connection established.'}`
+      });
       
     } catch (error) {
       console.error('Error linking database:', error);
@@ -1473,12 +1496,13 @@ async function saveMessageToExternalDB(databaseUrl, sender, receiver, msg, fileD
     return;
   }
   
-  const extPool = new Pool({
-    connectionString: databaseUrl,
-    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
-  });
-  
+  let extPool = null;
   try {
+    extPool = new Pool({
+      connectionString: databaseUrl,
+      ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+    });
+    
     // First check if the messages table exists
     const tableCheck = await extPool.query(`
       SELECT EXISTS (
@@ -1526,6 +1550,7 @@ async function saveMessageToExternalDB(databaseUrl, sender, receiver, msg, fileD
         console.log(`File message saved to external DB for ${receiver}`);
       } catch (fileErr) {
         console.error('Error saving file message to external DB:', fileErr);
+        throw fileErr; // Re-throw for proper error handling upstream
       }
     } else if (msg) {
       // Text message
@@ -1542,12 +1567,16 @@ async function saveMessageToExternalDB(databaseUrl, sender, receiver, msg, fileD
         console.log(`Text message saved to external DB for ${receiver}`);
       } catch (textErr) {
         console.error('Error saving text message to external DB:', textErr);
+        throw textErr; // Re-throw for proper error handling upstream
       }
     }
   } catch (err) {
     console.error('Error interacting with external DB:', err);
+    throw err; // Re-throw for proper error handling upstream
   } finally {
-    extPool.end().catch(err => console.error('Error closing external pool:', err));
+    if (extPool) {
+      extPool.end().catch(err => console.error('Error closing external pool:', err));
+    }
   }
 }
 
