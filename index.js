@@ -901,7 +901,7 @@ io.on('connection', (socket) => {
     };
 
     try {
-      // Get recipient's public key for E2E encryption
+      // Get recipient's public key for encryption
       let recipientPublicKey = null;
       const userQuery = await personalPool.query(
         'SELECT public_key FROM users WHERE username = $1',
@@ -924,7 +924,7 @@ io.on('connection', (socket) => {
         }
       }
       
-      // Get sender's symmetric key for local encryption
+      // Get sender's symmetric key for self-encryption
       const senderQuery = await personalPool.query(
         'SELECT symmetric_key FROM users WHERE username = $1',
         [socket.username]
@@ -932,7 +932,7 @@ io.on('connection', (socket) => {
       
       const symmetricKey = senderQuery.rows.length > 0 ? senderQuery.rows[0].symmetric_key : null;
       
-      // For recipient: encrypt with recipient's public key if available (E2E)
+      // For recipient: encrypt with recipient's key if available
       let recipientEncryptedUrl = recipientPublicKey ? encryptWithPublicKey(recipientPublicKey, fileUrl) : fileUrl;
       let recipientEncryptedName = recipientPublicKey ? encryptWithPublicKey(recipientPublicKey, name) : name;
       let recipientEncryptedType = recipientPublicKey ? encryptWithPublicKey(recipientPublicKey, type) : type;
@@ -976,7 +976,7 @@ io.on('connection', (socket) => {
             type: recipientEncryptedType, 
             size 
           },
-          true // E2E encrypted
+          true
         );
       }
     } catch (err) {
@@ -1117,19 +1117,38 @@ function saveMessage(sender, receiver, message, isEncrypted = true) {
   );
 }
 
+// Update saveFileMessage function to handle column existence checking
 function saveFileMessage(sender, receiver, fileUrl, name, type, size, isEncrypted = true) {
-  const query = `
-    INSERT INTO messages (sender, receiver, message, file_url, file_name, file_type, file_size, is_encrypted)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-  `;
-  const placeholderMessage = 'File attachment';
-  personalPool.query(
-    query, 
-    [sender, receiver, placeholderMessage, fileUrl, name, type, size, isEncrypted], 
-    (err) => {
-      if (err) console.error('Error saving file message:', err);
+  // First check if is_encrypted column exists
+  personalPool.query(`
+    SELECT column_name 
+    FROM information_schema.columns 
+    WHERE table_schema='public' AND table_name='messages' AND column_name='is_encrypted'
+  `, (columnErr, columnResult) => {
+    if (columnErr) {
+      console.error('Error checking for is_encrypted column:', columnErr);
+      return;
     }
-  );
+    
+    const isEncryptedExists = columnResult && columnResult.rows.length > 0;
+    
+    // Adjust query based on column existence
+    const placeholderMessage = 'File attachment';
+    const query = isEncryptedExists ?
+      `INSERT INTO messages (sender, receiver, message, file_url, file_name, file_type, file_size, is_encrypted)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)` :
+      `INSERT INTO messages (sender, receiver, message, file_url, file_name, file_type, file_size)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`;
+    
+    const params = isEncryptedExists ? 
+      [sender, receiver, placeholderMessage, fileUrl, name, type, size, isEncrypted] :
+      [sender, receiver, placeholderMessage, fileUrl, name, type, size];
+    
+    personalPool.query(query, params, (err) => {
+      if (err) console.error('Error saving file message:', err);
+      else console.log('File message saved successfully');
+    });
+  });
 }
 
 // Updated loadPrivateMessageHistory function
