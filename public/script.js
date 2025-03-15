@@ -566,29 +566,28 @@ function showImageModal(imgElement) {
   modal.style.display = 'flex';
   modalImg.src = imgElement.src;
   
+  // Store original file name if available
+  const fileName = imgElement.dataset.fileName || imgElement.alt || 'image';
+  
   downloadBtn.onclick = async () => {
     try {
-      // Fetch the image data
-      const response = await fetch(imgElement.src);
-      const blob = await response.blob();
-      
-      // Create a blob URL for the image data
-      const blobUrl = URL.createObjectURL(blob);
+      // Use the direct URL without any proxying
+      const fileUrl = imgElement.src;
       
       // Create a temporary link element
       const link = document.createElement('a');
-      link.href = blobUrl;
-      link.download = imgElement.alt || 'image';
+      link.href = fileUrl;
+      link.download = fileName; // Use the original filename
+      link.target = '_blank'; // Open in new tab as fallback
+      link.rel = 'noopener noreferrer';
       
       // Append to the document, click it, and remove it
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
-      
-      // Clean up the blob URL
-      setTimeout(() => URL.revokeObjectURL(blobUrl), 100);
     } catch (error) {
-      console.error('Error downloading image:', error);
+      console.error('Error downloading file:', error);
+      alert('Download failed. Try right-clicking the image and selecting "Save image as..."');
     }
   };
   
