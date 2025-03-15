@@ -549,18 +549,6 @@ app.post('/link-database', async (req, res) => {
       return res.status(400).json({ error: 'Databases are already linked.' });
     }
     
-    // Get current user's public key
-    const currentUserKeyQuery = await personalPool.query(
-      'SELECT public_key FROM users WHERE username = $1',
-      [currentUser]
-    );
-    
-    if (currentUserKeyQuery.rows.length === 0 || !currentUserKeyQuery.rows[0].public_key) {
-      return res.status(400).json({ error: 'Current user public key not found.' });
-    }
-    
-    const currentUserPublicKey = currentUserKeyQuery.rows[0].public_key;
-    
     // 2. Insert Bob into Alice's users table
     try {
       await personalPool.query(
@@ -574,57 +562,41 @@ app.post('/link-database', async (req, res) => {
       return res.status(500).json({ error: 'Error inserting user into local database.' });
     }
     
-    // 3. Connect to Bob's database to get his public key
-    let targetExtPool = null;
-    let targetUserPublicKey = null;
-    
-    try {
-      targetExtPool = new Pool({
-        connectionString: targetUser.database_url,
-        ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
-      });
-      
-      // Get Bob's public key
-      const targetUserKeyQuery = await targetExtPool.query(
-        'SELECT public_key FROM users WHERE username = $1',
-        [targetUser.username]
-      );
-      
-      if (targetUserKeyQuery.rows.length > 0 && targetUserKeyQuery.rows[0].public_key) {
-        targetUserPublicKey = targetUserKeyQuery.rows[0].public_key;
-      }
-    } catch (err) {
-      console.error('Error retrieving target user public key:', err);
-    }
-    
-    // 4. Insert into Alice's external_databases table a record for Bob with his public key
+    // 3. Insert into Alice's external_databases table a record for Bob
     try {
       await personalPool.query(
-        'INSERT INTO external_databases (username, authentificator, database_url, public_key) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING',
-        [targetUser.username, externalAuthenticator, targetUser.database_url, targetUserPublicKey]
+        'INSERT INTO external_databases (username, authentificator, database_url) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
+        [targetUser.username, externalAuthenticator, targetUser.database_url]
       );
     } catch (err) {
       console.error('Error inserting external database record:', err);
       return res.status(500).json({ error: 'Error inserting external database record.' });
     }
     
-    // 5. Insert Alice into Bob's users table
+    // 4. Connect to Bob's database using Bob's database URL
+    let targetExtPool = null;
     try {
-      if (targetExtPool) {
-        // Insert Alice into Bob's users table
-        await targetExtPool.query(
-          `INSERT INTO users (username, password, online)
-           VALUES ($1, $2, FALSE)
-           ON CONFLICT (username) DO NOTHING`,
-          [currentUser, null]
-        );
-        
-        // Insert Alice's details into Bob's external_databases table with her public key
-        await targetExtPool.query(
-          'INSERT INTO external_databases (username, authentificator, database_url, public_key) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING',
-          [currentUser, currentUserRecord.authentificator, currentUserRecord.database_url, currentUserPublicKey]
-        );
-      }
+      targetExtPool = new Pool({
+        connectionString: targetUser.database_url,
+        ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+      });
+      
+      // 5. Test connection to target database
+      await targetExtPool.query('SELECT NOW()');
+      
+      // 6. Insert Alice into Bob's users table
+      await targetExtPool.query(
+        `INSERT INTO users (username, password, online)
+         VALUES ($1, $2, FALSE)
+         ON CONFLICT (username) DO NOTHING`,
+        [currentUser, null]
+      );
+      
+      // 7. Insert Alice's details into Bob's external_databases table
+      await targetExtPool.query(
+        'INSERT INTO external_databases (username, authentificator, database_url) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
+        [currentUser, currentUserRecord.authentificator, currentUserRecord.database_url]
+      );
       
       res.json({ 
         message: 'External database linked successfully.',
@@ -645,7 +617,6 @@ app.post('/link-database', async (req, res) => {
     res.status(500).json({ error: 'Internal server error: ' + err.message });
   }
 });
-
 // ----------------------------
 // Helper Function: Save Message to an External Database
 // ----------------------------
