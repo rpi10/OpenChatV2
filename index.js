@@ -1045,6 +1045,146 @@ io.on('connection', (socket) => {
       console.error('Error sending push notification:', err);
     }
   }
+
+  // Update the link-database handler to work with Railway external URLs
+  socket.on('link-database', async (data) => {
+    if (!socket.username) return;
+    
+    try {
+      console.log(`User ${socket.username} is trying to link with ${data.username}`);
+      
+      // Check if username already exists locally
+      const localUserResult = await personalPool.query(
+        'SELECT username FROM users WHERE username = $1',
+        [data.username]
+      );
+      
+      if (localUserResult.rows.length > 0) {
+        socket.emit('link-response', { success: false, message: 'Username already exists in your local database.' });
+        return;
+      }
+      
+      // Check if this external user is already linked
+      const externalCheckResult = await personalPool.query(
+        'SELECT username FROM external_databases WHERE username = $1',
+        [data.username]
+      );
+      
+      if (externalCheckResult.rows.length > 0) {
+        socket.emit('link-response', { success: false, message: 'This user is already linked to your database.' });
+        return;
+      }
+      
+      // Validate and format the database URL for external access on Railway
+      const externalDbUrl = formatRailwayUrlForExternalAccess(data.databaseUrl);
+      console.log(`Using formatted external URL for ${data.username}'s database`);
+      
+      // Store the user's database info in the local database first
+      await personalPool.query(
+        'INSERT INTO external_databases (username, database_url, public_key) VALUES ($1, $2, $3)',
+        [data.username, externalDbUrl, null] // We'll update public_key if we can connect
+      );
+      
+      // Now try to connect to the external database to get public key and set up the reverse link
+      let extPublicKey = null;
+      try {
+        // Attempt to connect to the external database with the properly formatted URL
+        const externalPool = new Pool({
+          connectionString: externalDbUrl,
+          ssl: { rejectUnauthorized: false } // Required for Railway external connections
+        });
+        
+        try {
+          // Verify connection by making a simple query
+          await externalPool.query('SELECT NOW()');
+          console.log(`Successfully connected to ${data.username}'s database`);
+          
+          // Get public key from external user
+          try {
+            const externalUserResult = await externalPool.query(
+              'SELECT public_key FROM users WHERE username = $1',
+              [data.username]
+            );
+            
+            if (externalUserResult.rows.length > 0) {
+              extPublicKey = externalUserResult.rows[0].public_key;
+              console.log(`Successfully retrieved ${data.username}'s public key`);
+              
+              // Update the stored record with the retrieved public key
+              await personalPool.query(
+                'UPDATE external_databases SET public_key = $1 WHERE username = $2',
+                [extPublicKey, data.username]
+              );
+            } else {
+              console.log(`User ${data.username} not found in their database`);
+            }
+          } catch (keyError) {
+            console.error('Error retrieving target user public key:', keyError);
+          }
+          
+          // Try to set up the reverse link - first get our public key
+          try {
+            const myPublicKeyResult = await personalPool.query(
+              'SELECT public_key FROM users WHERE username = $1',
+              [socket.username]
+            );
+            
+            let myPublicKey = null;
+            if (myPublicKeyResult.rows.length > 0) {
+              myPublicKey = myPublicKeyResult.rows[0].public_key;
+            }
+            
+            // Get our database's public URL for the other app to connect to
+            const myPublicDatabaseUrl = process.env.PUBLIC_DATABASE_URL || formatRailwayUrlForExternalAccess(process.env.DATABASE_URL);
+            
+            // Check if external_databases table exists
+            const tableCheckResult = await externalPool.query(`
+              SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_name = 'external_databases'
+              ) as has_external_table
+            `);
+            
+            if (tableCheckResult.rows[0].has_external_table) {
+              // Try to insert our info into their external_databases table
+              await externalPool.query(
+                'INSERT INTO external_databases (username, database_url, public_key) VALUES ($1, $2, $3) ON CONFLICT (username) DO NOTHING',
+                [socket.username, myPublicDatabaseUrl, myPublicKey]
+              );
+              console.log(`Successfully added link to ${data.username}'s database`);
+            } else {
+              console.log(`External database for ${data.username} doesn't have external_databases table`);
+            }
+          } catch (linkError) {
+            console.error('Error connecting to or inserting into target database:', linkError);
+          }
+        } finally {
+          // Always close the external pool
+          await externalPool.end();
+        }
+      } catch (connectionError) {
+        console.error('Error connecting to external database:', connectionError);
+        // We don't fail the whole operation - we've already stored their info locally
+      }
+      
+      // Update users list for the current socket
+      updateUsersList(socket);
+      
+      // Consider it a success if we at least stored their info locally
+      socket.emit('link-response', { 
+        success: true, 
+        message: `Successfully linked with ${data.username}'s database! ${extPublicKey ? 'Full two-way connection established.' : 'One-way connection established.'}`
+      });
+      
+    } catch (error) {
+      console.error('Error linking database:', error);
+      socket.emit('link-response', { 
+        success: false, 
+        message: 'Failed to link database. Please check the URL and try again.' 
+      });
+    }
+  });
 });
 
 // ----------------------------
@@ -1349,13 +1489,33 @@ async function saveMessageToExternalDB(databaseUrl, sender, receiver, msg, fileD
     return;
   }
   
-  const extPool = new Pool({
-    connectionString: databaseUrl,
-    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
-  });
+  // Ensure the URL is formatted for external access
+  const externalDbUrl = formatRailwayUrlForExternalAccess(databaseUrl);
   
+  let extPool = null;
   try {
-    // First check if schema is compatible with our current code
+    extPool = new Pool({
+      connectionString: externalDbUrl,
+      ssl: { rejectUnauthorized: false } // Required for Railway external connections
+    });
+    
+    // First check if the messages table exists
+    const tableCheck = await extPool.query(`
+      SELECT EXISTS (
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_name = 'messages'
+      ) as has_messages_table
+    `);
+    
+    const hasMessagesTable = tableCheck.rows[0]?.has_messages_table || false;
+    
+    if (!hasMessagesTable) {
+      console.error('Messages table does not exist in external database');
+      return;
+    }
+    
+    // Check schema compatibility
     const schemaCheck = await extPool.query(`
       SELECT EXISTS (
         SELECT 1
@@ -1368,7 +1528,7 @@ async function saveMessageToExternalDB(databaseUrl, sender, receiver, msg, fileD
     const hasIsEncrypted = schemaCheck.rows[0]?.has_is_encrypted || false;
     
     if (fileData) {
-      // Construct the query based on schema compatibility
+      // File message handling
       const query = hasIsEncrypted ?
         `INSERT INTO messages (sender, receiver, message, file_url, file_name, file_type, file_size, is_encrypted)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)` :
@@ -1382,7 +1542,7 @@ async function saveMessageToExternalDB(databaseUrl, sender, receiver, msg, fileD
       
       await extPool.query(query, params);
     } else if (msg) {
-      // Text message
+      // Text message handling
       const query = hasIsEncrypted ?
         'INSERT INTO messages (sender, receiver, message, is_encrypted) VALUES ($1, $2, $3, $4)' :
         'INSERT INTO messages (sender, receiver, message) VALUES ($1, $2, $3)';
@@ -1394,9 +1554,79 @@ async function saveMessageToExternalDB(databaseUrl, sender, receiver, msg, fileD
       await extPool.query(query, params);
     }
   } catch (err) {
-    console.error('Error inserting message into external DB:', err);
+    console.error('Error interacting with external DB:', err);
   } finally {
-    extPool.end().catch(err => console.error('Error closing external pool:', err));
+    if (extPool) {
+      extPool.end().catch(err => console.error('Error closing external pool:', err));
+    }
+  }
+}
+
+// Helper function to format Railway URLs for external access
+function formatRailwayUrlForExternalAccess(url) {
+  if (!url) return url;
+  
+  try {
+    // Parse the URL
+    const parsedUrl = new URL(url);
+    
+    // If it's already a Railway public URL, just make sure SSL is set up correctly
+    if (parsedUrl.hostname.includes('railway.app')) {
+      // Railway public URLs typically follow this format:
+      // postgresql://postgres:password@containers-us-west-XXX.railway.app:XXXX/railway
+      
+      // Make sure the correct port is used for external access
+      // The port in the URL should be the external-facing port
+      
+      // Return the URL with correct SSL parameters
+      return url;
+    }
+    
+    // If it's an internal URL or environment variable, we need to format it
+    // This handles cases where DATABASE_URL is set to an internal reference
+    if (process.env.PUBLIC_DATABASE_HOST && 
+        process.env.PUBLIC_DATABASE_PORT && 
+        process.env.DATABASE_USER && 
+        process.env.DATABASE_PASSWORD) {
+      
+      // Construct an external URL from the parsed components
+      return `postgresql://${process.env.DATABASE_USER}:${process.env.DATABASE_PASSWORD}@${process.env.PUBLIC_DATABASE_HOST}:${process.env.PUBLIC_DATABASE_PORT}/${parsedUrl.pathname.substring(1)}`;
+    }
+    
+    // If we couldn't format it properly, return the original
+    return url;
+  } catch (error) {
+    console.error('Error formatting database URL for external access:', error);
+    return url; // Return original if parsing fails
+  }
+}
+
+// Add to the server startup code - detect and set up public database URL
+// This should be near the beginning of your file, right after environment setup
+if (!process.env.PUBLIC_DATABASE_URL) {
+  // Try to construct a public URL from the Railway environment variables
+  if (process.env.DATABASE_URL && process.env.RAILWAY_PUBLIC_DOMAIN) {
+    try {
+      const parsedUrl = new URL(process.env.DATABASE_URL);
+      // Extract public-facing hostname for Railway
+      // This is usually something like: containers-us-west-XXX.railway.app
+      const publicHost = process.env.RAILWAY_PUBLIC_DOMAIN || parsedUrl.hostname;
+      
+      // Railway uses a specific port mapping for external access
+      // This port is usually different from the internal port
+      const publicPort = process.env.DATABASE_EXTERNAL_PORT || parsedUrl.port;
+      
+      process.env.PUBLIC_DATABASE_URL = `postgresql://${parsedUrl.username}:${parsedUrl.password}@${publicHost}:${publicPort}${parsedUrl.pathname}`;
+      
+      console.log('Public database URL configured for external access');
+    } catch (error) {
+      console.error('Failed to construct public database URL:', error);
+      // Fall back to using the regular DATABASE_URL
+      process.env.PUBLIC_DATABASE_URL = process.env.DATABASE_URL;
+    }
+  } else {
+    // Fall back to the regular DATABASE_URL
+    process.env.PUBLIC_DATABASE_URL = process.env.DATABASE_URL;
   }
 }
 
