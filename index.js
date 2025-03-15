@@ -1091,115 +1091,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('link-database', async (data) => {
-    if (!socket.username) return;
-    
-    try {
-      console.log(`User ${socket.username} is trying to link with ${data.username}`);
-      
-      // Check if username already exists locally
-      const localUserResult = await personalPool.query(
-        'SELECT username FROM users WHERE username = $1',
-        [data.username]
-      );
-      
-      if (localUserResult.rows.length > 0) {
-        socket.emit('link-response', { success: false, message: 'Username already exists in your local database.' });
-        return;
-      }
-      
-      // Check if this external user is already linked
-      const externalCheckResult = await personalPool.query(
-        'SELECT username FROM external_databases WHERE username = $1',
-        [data.username]
-      );
-      
-      if (externalCheckResult.rows.length > 0) {
-        socket.emit('link-response', { success: false, message: 'This user is already linked to your database.' });
-        return;
-      }
-      
-      // Attempt to connect to the external database
-      const externalPool = new Pool({
-        connectionString: data.databaseUrl,
-        ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
-      });
-      
-      try {
-        // Verify connection by making a simple query
-        await externalPool.query('SELECT NOW()');
-        
-        // Get public key from external user - don't reference any columns that might not exist
-        // Instead, just check if the user exists and retrieve only the public_key
-        const externalUserResult = await externalPool.query(
-          'SELECT public_key FROM users WHERE username = $1',
-          [data.username]
-        );
-        
-        let publicKey = null;
-        if (externalUserResult.rows.length > 0) {
-          publicKey = externalUserResult.rows[0].public_key;
-        }
-        
-        // Store the external database info in the local database
-        await personalPool.query(
-          'INSERT INTO external_databases (username, database_url, public_key) VALUES ($1, $2, $3)',
-          [data.username, data.databaseUrl, publicKey]
-        );
-        
-        // Get just the necessary public key from local database
-        const myPublicKeyResult = await personalPool.query(
-          'SELECT public_key FROM users WHERE username = $1',
-          [socket.username]
-        );
-        
-        let myPublicKey = null;
-        if (myPublicKeyResult.rows.length > 0) {
-          myPublicKey = myPublicKeyResult.rows[0].public_key;
-        }
-        
-        // Add the local user to the remote database's external_databases table
-        // First check if the external_databases table exists in external database
-        const tableCheckResult = await externalPool.query(`
-          SELECT EXISTS (
-            SELECT 1
-            FROM information_schema.tables
-            WHERE table_name = 'external_databases'
-          ) as has_external_table
-        `);
-        
-        if (tableCheckResult.rows[0].has_external_table) {
-          // Table exists, proceed with insertion
-          await externalPool.query(
-            'INSERT INTO external_databases (username, database_url, public_key) VALUES ($1, $2, $3) ON CONFLICT (username) DO NOTHING',
-            [socket.username, process.env.DATABASE_URL, myPublicKey]
-          );
-        } else {
-          console.log(`External database for ${data.username} doesn't have external_databases table yet`);
-        }
-        
-        // Update users list for the current socket
-        updateUsersList(socket);
-        
-        socket.emit('link-response', { 
-          success: true, 
-          message: `Successfully linked with ${data.username}'s database!` 
-        });
-        
-      } finally {
-        // Always close the external pool
-        await externalPool.end();
-      }
-      
-    } catch (error) {
-      console.error('Error linking database:', error);
-      socket.emit('link-response', { 
-        success: false, 
-        message: 'Failed to link database. Please check the URL and try again.' 
-      });
-    }
-  });
-
   async function sendPushNotification(subscription, message) {
     try {
       await webpush.sendNotification(subscription, JSON.stringify(message));
@@ -1479,23 +1370,7 @@ async function saveMessageToExternalDB(databaseUrl, sender, receiver, msg, fileD
   });
   
   try {
-    // First check if the messages table exists
-    const tableCheck = await extPool.query(`
-      SELECT EXISTS (
-        SELECT 1
-        FROM information_schema.tables
-        WHERE table_name = 'messages'
-      ) as has_messages_table
-    `);
-    
-    const hasMessagesTable = tableCheck.rows[0]?.has_messages_table || false;
-    
-    if (!hasMessagesTable) {
-      console.error('Messages table does not exist in external database');
-      return;
-    }
-    
-    // Check schema compatibility
+    // First check if schema is compatible with our current code
     const schemaCheck = await extPool.query(`
       SELECT EXISTS (
         SELECT 1
@@ -1508,130 +1383,37 @@ async function saveMessageToExternalDB(databaseUrl, sender, receiver, msg, fileD
     const hasIsEncrypted = schemaCheck.rows[0]?.has_is_encrypted || false;
     
     if (fileData) {
-      // File message
-      try {
-        // Construct the query based on schema compatibility
-        const query = hasIsEncrypted ?
-          `INSERT INTO messages (sender, receiver, message, file_url, file_name, file_type, file_size, is_encrypted)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)` :
-          `INSERT INTO messages (sender, receiver, message, file_url, file_name, file_type, file_size)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)`;
-        
-        const placeholderMessage = 'File attachment';
-        const params = hasIsEncrypted ?
-          [sender, receiver, placeholderMessage, fileData.fileUrl, fileData.name, fileData.type, fileData.size, isEncrypted] :
-          [sender, receiver, placeholderMessage, fileData.fileUrl, fileData.name, fileData.type, fileData.size];
-        
-        await extPool.query(query, params);
-        console.log(`File message saved to external DB for ${receiver}`);
-      } catch (fileErr) {
-        console.error('Error saving file message to external DB:', fileErr);
-      }
+      // Construct the query based on schema compatibility
+      const query = hasIsEncrypted ?
+        `INSERT INTO messages (sender, receiver, message, file_url, file_name, file_type, file_size, is_encrypted)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)` :
+        `INSERT INTO messages (sender, receiver, message, file_url, file_name, file_type, file_size)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`;
+      
+      const placeholderMessage = 'File attachment';
+      const params = hasIsEncrypted ?
+        [sender, receiver, placeholderMessage, fileData.fileUrl, fileData.name, fileData.type, fileData.size, isEncrypted] :
+        [sender, receiver, placeholderMessage, fileData.fileUrl, fileData.name, fileData.type, fileData.size];
+      
+      await extPool.query(query, params);
     } else if (msg) {
       // Text message
-      try {
-        const query = hasIsEncrypted ?
-          'INSERT INTO messages (sender, receiver, message, is_encrypted) VALUES ($1, $2, $3, $4)' :
-          'INSERT INTO messages (sender, receiver, message) VALUES ($1, $2, $3)';
-        
-        const params = hasIsEncrypted ?
-          [sender, receiver, msg, isEncrypted] :
-          [sender, receiver, msg];
-        
-        await extPool.query(query, params);
-        console.log(`Text message saved to external DB for ${receiver}`);
-      } catch (textErr) {
-        console.error('Error saving text message to external DB:', textErr);
-      }
+      const query = hasIsEncrypted ?
+        'INSERT INTO messages (sender, receiver, message, is_encrypted) VALUES ($1, $2, $3, $4)' :
+        'INSERT INTO messages (sender, receiver, message) VALUES ($1, $2, $3)';
+      
+      const params = hasIsEncrypted ?
+        [sender, receiver, msg, isEncrypted] :
+        [sender, receiver, msg];
+      
+      await extPool.query(query, params);
     }
   } catch (err) {
-    console.error('Error interacting with external DB:', err);
+    console.error('Error inserting message into external DB:', err);
   } finally {
     extPool.end().catch(err => console.error('Error closing external pool:', err));
   }
 }
-
-// Fix updateUsersList function
-function updateUsersList(socket) {
-  if (!socket.username) return;
-  
-  personalPool.query(`
-    SELECT username, last_seen, 
-           (to_timestamp(extract(epoch from last_seen)) > NOW() - INTERVAL '5 minutes') as online
-    FROM users 
-    WHERE username != $1
-    UNION
-    SELECT username, NULL as last_seen, false as online
-    FROM external_databases
-    ORDER BY username
-  `, [socket.username], (err, result) => {
-    if (err) {
-      console.error('Error fetching users list:', err);
-      return;
-    }
-    
-    const usersList = result.rows.map(row => ({
-      username: row.username,
-      online: row.online
-    }));
-    
-    console.log(`Users list for ${socket.username} updated:`, usersList);
-    socket.emit('users list', usersList);
-  });
-}
-
-// Ensure tables are created with correct schema on startup
-async function ensureTablesExist() {
-  try {
-    // First check if external_databases table exists
-    const tableCheck = await personalPool.query(`
-      SELECT EXISTS (
-        SELECT 1
-        FROM information_schema.tables
-        WHERE table_name = 'external_databases'
-      ) as has_external_db_table
-    `);
-    
-    if (!tableCheck.rows[0]?.has_external_db_table) {
-      // Create external_databases table if it doesn't exist
-      await personalPool.query(`
-        CREATE TABLE external_databases (
-          username TEXT PRIMARY KEY,
-          database_url TEXT NOT NULL,
-          public_key TEXT,
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-      `);
-      console.log('Created external_databases table');
-    }
-    
-    // Make sure messages table has is_encrypted column
-    const columnCheck = await personalPool.query(`
-      SELECT EXISTS (
-        SELECT 1
-        FROM information_schema.columns
-        WHERE table_name = 'messages'
-        AND column_name = 'is_encrypted'
-      ) as has_is_encrypted
-    `);
-    
-    if (!columnCheck.rows[0]?.has_is_encrypted) {
-      // Add is_encrypted column to messages table
-      await personalPool.query(`
-        ALTER TABLE messages
-        ADD COLUMN is_encrypted BOOLEAN DEFAULT false
-      `);
-      console.log('Added is_encrypted column to messages table');
-    }
-  } catch (err) {
-    console.error('Error ensuring tables exist:', err);
-  }
-}
-
-// Call this function on startup
-ensureTablesExist().catch(err => {
-  console.error('Failed to ensure tables exist:', err);
-});
 
 // ----------------------------
 // Start the Server
