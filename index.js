@@ -791,17 +791,19 @@ io.on('connection', (socket) => {
     if (!socket.username) return;
     const now = new Date();
     const messageId = generateMessageId();
-    const message = {
+    
+    // Create a consistent message object
+    const messageForUI = {
       from: socket.username,
-      msg,
-      to,
+      to: to,
+      msg: msg,
       timestamp: formatTime(now),
       dayLabel: formatDayLabel(now),
-      messageId
+      messageId: messageId
     };
 
     try {
-      // Get recipient's public key for E2E encryption
+      // Get recipient's public key for encryption
       let recipientPublicKey = null;
       const userQuery = await personalPool.query(
         'SELECT public_key FROM users WHERE username = $1',
@@ -824,7 +826,7 @@ io.on('connection', (socket) => {
         }
       }
       
-      // Get sender's symmetric key for local encryption
+      // Get sender's symmetric key for self-encryption
       const senderQuery = await personalPool.query(
         'SELECT symmetric_key FROM users WHERE username = $1',
         [socket.username]
@@ -832,23 +834,21 @@ io.on('connection', (socket) => {
       
       const symmetricKey = senderQuery.rows.length > 0 ? senderQuery.rows[0].symmetric_key : null;
       
-      // For recipient DB: encrypt with recipient's public key (E2E)
-      let recipientEncryptedMsg = recipientPublicKey ? 
-        encryptWithPublicKey(recipientPublicKey, msg) : msg;
+      // For recipient DB: encrypt with recipient's public key
+      let recipientEncryptedMsg = recipientPublicKey ? encryptWithPublicKey(recipientPublicKey, msg) : msg;
       
-      // For sender DB: encrypt with sender's symmetric key
-      let senderStoredMsg = symmetricKey ? 
-        encryptWithSymmetricKey(symmetricKey, msg) : msg;
+      // For sender's DB: encrypt with sender's symmetric key
+      let senderEncryptedMsg = symmetricKey ? encryptWithSymmetricKey(symmetricKey, msg) : msg;
       
-      // Both are encrypted, just with different methods
-      const isEncrypted = true;
+      // Save message to local database (encrypted with symmetric key for sender)
+      saveMessage(socket.username, to, senderEncryptedMsg, true);
       
-      // Save message to local database (encrypted with symmetric key)
-      saveMessage(socket.username, to, senderStoredMsg, isEncrypted);
+      // FIRST: Send back to sender for UI update
+      socket.emit('chat message', messageForUI);
       
-      // Send to recipient if online
+      // SECOND: Send to recipient if online
       if (users[to] && users[to].online) {
-        io.to(users[to].socketId).emit('chat message', message);
+        io.to(users[to].socketId).emit('chat message', messageForUI);
         io.to(users[to].socketId).emit('notification', `New message from ${socket.username}`);
         if (users[to].pushSubscription) {
           sendPushNotification(JSON.parse(users[to].pushSubscription), {
@@ -857,9 +857,6 @@ io.on('connection', (socket) => {
           });
         }
       }
-      
-      // Send back to sender for UI update
-      socket.emit('chat message', message);
       
       // Cross-database messaging
       const recipientExternalResult = await personalPool.query(
@@ -873,9 +870,9 @@ io.on('connection', (socket) => {
           recipientDB.database_url, 
           socket.username, 
           to, 
-          recipientEncryptedMsg, 
+          recipientEncryptedMsg,
           null,
-          true // E2E encrypted
+          true
         );
       }
     } catch (err) {
@@ -887,16 +884,19 @@ io.on('connection', (socket) => {
     if (!socket.username) return;
     const now = new Date();
     const messageId = generateMessageId();
-    const message = {
+    
+    // Create a properly formatted message object - exactly as expected by the frontend
+    const messageForUI = {
       from: socket.username,
+      to: to,
+      msg: 'File attachment', // Important: This must be 'File attachment' for the frontend to recognize
       fileUrl: fileUrl,
       fileName: name,
       fileType: type,
       fileSize: size,
-      to,
       timestamp: formatTime(now),
       dayLabel: formatDayLabel(now),
-      messageId,
+      messageId: messageId,
       isFileMessage: true
     };
 
@@ -948,14 +948,14 @@ io.on('connection', (socket) => {
       // Save to sender's database (encrypted with symmetric key)
       saveFileMessage(socket.username, to, senderEncryptedUrl, senderEncryptedName, senderEncryptedType, size, isEncrypted);
       
-      // Send to recipient if online
+      // FIRST: Send back to sender for UI update
+      socket.emit('chat message', messageForUI);
+
+      // SECOND: Send to recipient if online
       if (users[to] && users[to].online) {
-        io.to(users[to].socketId).emit('file message', message);
+        io.to(users[to].socketId).emit('chat message', messageForUI);
         io.to(users[to].socketId).emit('notification', `New file from ${socket.username}`);
       }
-      
-      // Send back to sender for UI update (just once)
-      socket.emit('file message', message);
       
       // Cross-database file message handling
       const recipientExternalResult = await personalPool.query(
