@@ -54,25 +54,69 @@ app.post('/upload', upload.single('file'), async (req, res) => {
   }
   try {
     await b2.authorize();
+    const { data: { downloadUrl } } = await b2.getDownloadAuthorization({
+      bucketId: process.env.B2_BUCKET_ID,
+      fileNamePrefix: '',
+      validDurationInSeconds: 604800 // 1 week
+    });
+    
     const { data: { uploadUrl, authorizationToken } } = await b2.getUploadUrl({
       bucketId: process.env.B2_BUCKET_ID
     });
+    
+    // Generate a unique filename to prevent collisions
+    const originalName = req.file.originalname;
+    const uniquePrefix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    const fileName = uniquePrefix + '-' + originalName.replace(/[^a-zA-Z0-9._-]/g, '_');
+    
     const fileBuffer = req.file.buffer;
-    const fileName = req.file.originalname;
-    await b2.uploadFile({
+    
+    // Upload to Backblaze B2
+    const uploadResult = await b2.uploadFile({
       uploadUrl,
       uploadAuthToken: authorizationToken,
       fileName,
       data: fileBuffer,
       contentType: req.file.mimetype
     });
-    const publicUrl = `${process.env.B2_BUCKET_URL}/${fileName}`;
+    
+    console.log('File uploaded successfully:', uploadResult.data.fileName);
+    
+    // Construct the proper Backblaze URL format
+    // Format: https://f001.backblazeb2.com/file/bucket-name/filename.jpg
+    const bucketName = process.env.B2_BUCKET_NAME; // Make sure you have this in your .env
+    const publicUrl = `${process.env.B2_DOWNLOAD_URL}/file/${bucketName}/${fileName}`;
+    
+    console.log('Download URL generated:', publicUrl);
+    
     res.json({ url: publicUrl });
   } catch (err) {
     console.error('Error uploading file:', err);
-    res.status(500).json({ error: 'Error uploading the file.' });
+    res.status(500).json({ error: 'Error uploading the file.', details: err.message });
   }
 });
+
+// Add this helper function to format file URLs correctly
+function ensureValidBackblazeUrl(fileUrl) {
+  if (!fileUrl) return fileUrl;
+  
+  try {
+    // If URL is already in correct format, return as is
+    if (fileUrl.includes('/file/')) {
+      return fileUrl;
+    }
+    
+    // Extract filename from URL
+    const fileName = fileUrl.split('/').pop();
+    
+    // Recreate URL in correct format
+    const bucketName = process.env.B2_BUCKET_NAME;
+    return `${process.env.B2_DOWNLOAD_URL}/file/${bucketName}/${fileName}`;
+  } catch (error) {
+    console.error('Error formatting Backblaze URL:', error);
+    return fileUrl; // Return original if something goes wrong
+  }
+}
 
 // ----------------------------
 // Transcription Endpoint (Groq API)
@@ -1252,6 +1296,11 @@ function loadPrivateMessageHistory(user1, user2, callback) {
               console.error('Error decrypting message content:', decryptError);
               // Keep the original values if decryption fails
             }
+          }
+          
+          // Ensure file URL is in correct format before returning
+          if (finalFileUrl) {
+            finalFileUrl = ensureValidBackblazeUrl(finalFileUrl);
           }
           
           // Build the exact same object structure for both history and real-time
