@@ -167,7 +167,7 @@ app.use(session({
 // Initialize PostgreSQL Personal Database Pool
 // ----------------------------
 const personalPool = new Pool({
-  connectionString: process.env.DATABASE_URL,
+  connectionString: process.env.DATABASE_PUBLIC_URL || process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
 });
 
@@ -327,7 +327,7 @@ async function registerGeneralUser(username, password) {
     throw new Error('Could not generate unique authenticator after multiple attempts');
   };
   
-  const databaseURL = process.env.DATABASE_URL;
+  const databaseURL = process.env.DATABASE_PUBLIC_URL || process.env.DATABASE_URL;
   
   try {
     // Double-check if username already exists
@@ -580,6 +580,14 @@ app.post('/link-database', async (req, res) => {
           'INSERT INTO external_databases (username, authentificator, database_url, public_key) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING',
           [currentUser, currentUserRecord.authentificator, currentUserRecord.database_url, currentUserPublicKey]
         );
+      }
+      
+      // Ensure current user record has the public URL
+      if (currentUserRecord.database_url !== process.env.DATABASE_PUBLIC_URL && process.env.DATABASE_PUBLIC_URL) {
+        // Update the record to use the public URL
+        currentUserRecord.database_url = process.env.DATABASE_PUBLIC_URL;
+        await currentUserRecord.save();
+        console.log(`Updated ${currentUser}'s database URL to public URL in general database`);
       }
       
       res.json({ 
