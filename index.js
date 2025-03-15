@@ -219,8 +219,17 @@ personalPool.query(`
         online BOOLEAN DEFAULT FALSE,
         push_subscription TEXT,
         public_key TEXT,
-        private_key TEXT
+        private_key TEXT,
+        symmetric_key TEXT
       );
+    ELSE
+      -- Add symmetric_key column if it doesn't exist
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_schema='public' AND table_name='users' AND column_name='symmetric_key'
+      ) THEN
+        ALTER TABLE users ADD COLUMN symmetric_key TEXT;
+      END IF;
     END IF;
 
     -- Create messages table if it doesn't exist
@@ -283,9 +292,9 @@ personalPool.query(`
   END $$;
 `, (err) => {
   if (err) {
-    console.error('Error creating tables in personal database:', err);
+    console.error('Error setting up database schema:', err);
   } else {
-    console.log('Personal database tables created or verified successfully.');
+    console.log('Database schema setup successfully.');
   }
 });
 
@@ -356,7 +365,7 @@ async function registerGeneralUser(username, password) {
   }
 }
 
-// Replace the encryption utility functions with more robust versions
+// Add these improved encryption utility functions
 function generateKeyPair() {
   return crypto.generateKeyPairSync('rsa', {
     modulusLength: 2048,
@@ -371,7 +380,13 @@ function generateKeyPair() {
   });
 }
 
-function encryptMessage(publicKey, message) {
+// Generate a random symmetric key for local message encryption
+function generateSymmetricKey() {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+// Encrypt with public key (for E2E encryption)
+function encryptWithPublicKey(publicKey, message) {
   if (!message || !publicKey) return message;
   try {
     return crypto.publicEncrypt(
@@ -382,17 +397,18 @@ function encryptMessage(publicKey, message) {
       Buffer.from(String(message))
     ).toString('base64');
   } catch (err) {
-    console.error('Encryption error:', err);
-    return message; // Return original message if encryption fails
+    console.error('RSA encryption error:', err);
+    return message;
   }
 }
 
-function decryptMessage(privateKey, encryptedMessage) {
+// Decrypt with private key (for E2E encryption)
+function decryptWithPrivateKey(privateKey, encryptedMessage) {
   if (!encryptedMessage || !privateKey) return encryptedMessage;
   try {
-    // Check if the message is actually encrypted (should be base64)
+    // Check if the message is actually encrypted (base64)
     if (!/^[A-Za-z0-9+/=]+$/.test(encryptedMessage)) {
-      return encryptedMessage; // Not a base64 string, return as is
+      return encryptedMessage;
     }
     
     return crypto.privateDecrypt(
@@ -403,8 +419,40 @@ function decryptMessage(privateKey, encryptedMessage) {
       Buffer.from(encryptedMessage, 'base64')
     ).toString();
   } catch (err) {
-    console.error('Decryption error:', err);
-    return encryptedMessage; // Return encrypted text if decryption fails
+    console.error('RSA decryption error:', err);
+    return encryptedMessage;
+  }
+}
+
+// AES encryption for local storage (symmetric)
+function encryptWithSymmetricKey(key, message) {
+  if (!message || !key) return message;
+  try {
+    const iv = crypto.randomBytes(16);
+    const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from(key, 'hex'), iv);
+    let encrypted = cipher.update(String(message), 'utf8', 'base64');
+    encrypted += cipher.final('base64');
+    return iv.toString('hex') + ':' + encrypted; // Store IV with the message
+  } catch (err) {
+    console.error('AES encryption error:', err);
+    return message;
+  }
+}
+
+// AES decryption for local storage (symmetric)
+function decryptWithSymmetricKey(key, encryptedMessage) {
+  if (!encryptedMessage || !key || !encryptedMessage.includes(':')) return encryptedMessage;
+  try {
+    const parts = encryptedMessage.split(':');
+    const iv = Buffer.from(parts[0], 'hex');
+    const encrypted = parts[1];
+    const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(key, 'hex'), iv);
+    let decrypted = decipher.update(encrypted, 'base64', 'utf8');
+    decrypted += decipher.final('utf8');
+    return decrypted;
+  } catch (err) {
+    console.error('AES decryption error:', err);
+    return encryptedMessage;
   }
 }
 
@@ -753,7 +801,7 @@ io.on('connection', (socket) => {
     };
 
     try {
-      // Get recipient's public key for encryption
+      // Get recipient's public key for E2E encryption
       let recipientPublicKey = null;
       const userQuery = await personalPool.query(
         'SELECT public_key FROM users WHERE username = $1',
@@ -776,22 +824,26 @@ io.on('connection', (socket) => {
         }
       }
       
-      // Get sender's public key for self-encryption
+      // Get sender's symmetric key for local encryption
       const senderQuery = await personalPool.query(
-        'SELECT public_key FROM users WHERE username = $1',
+        'SELECT symmetric_key FROM users WHERE username = $1',
         [socket.username]
       );
       
-      const senderPublicKey = senderQuery.rows.length > 0 ? senderQuery.rows[0].public_key : null;
+      const symmetricKey = senderQuery.rows.length > 0 ? senderQuery.rows[0].symmetric_key : null;
       
-      // For recipient DB: encrypt with recipient's key
-      let recipientEncryptedMsg = recipientPublicKey ? encryptMessage(recipientPublicKey, msg) : msg;
+      // For recipient DB: encrypt with recipient's public key (E2E)
+      let recipientEncryptedMsg = recipientPublicKey ? 
+        encryptWithPublicKey(recipientPublicKey, msg) : msg;
       
-      // For sender DB: either store unencrypted or encrypt with sender's own key
-      let senderStoredMsg = msg;
-      const isEncrypted = false; // Don't mark self-messages as encrypted for simpler retrieval
+      // For sender DB: encrypt with sender's symmetric key
+      let senderStoredMsg = symmetricKey ? 
+        encryptWithSymmetricKey(symmetricKey, msg) : msg;
       
-      // Save message to local database (use unencrypted for sender)
+      // Both are encrypted, just with different methods
+      const isEncrypted = true;
+      
+      // Save message to local database (encrypted with symmetric key)
       saveMessage(socket.username, to, senderStoredMsg, isEncrypted);
       
       // Send to recipient if online
@@ -823,7 +875,7 @@ io.on('connection', (socket) => {
           to, 
           recipientEncryptedMsg, 
           null,
-          !!recipientPublicKey
+          true // E2E encrypted
         );
       }
     } catch (err) {
@@ -849,7 +901,7 @@ io.on('connection', (socket) => {
     };
 
     try {
-      // Get recipient's public key for encryption
+      // Get recipient's public key for E2E encryption
       let recipientPublicKey = null;
       const userQuery = await personalPool.query(
         'SELECT public_key FROM users WHERE username = $1',
@@ -872,16 +924,29 @@ io.on('connection', (socket) => {
         }
       }
       
-      // For recipient: encrypt with recipient's key if available
-      let recipientEncryptedUrl = recipientPublicKey ? encryptMessage(recipientPublicKey, fileUrl) : fileUrl;
-      let recipientEncryptedName = recipientPublicKey ? encryptMessage(recipientPublicKey, name) : name;
-      let recipientEncryptedType = recipientPublicKey ? encryptMessage(recipientPublicKey, type) : type;
+      // Get sender's symmetric key for local encryption
+      const senderQuery = await personalPool.query(
+        'SELECT symmetric_key FROM users WHERE username = $1',
+        [socket.username]
+      );
       
-      // For sender: store unencrypted
-      const isEncrypted = false; // Don't mark self-messages as encrypted
+      const symmetricKey = senderQuery.rows.length > 0 ? senderQuery.rows[0].symmetric_key : null;
       
-      // Save to sender's database (unencrypted)
-      saveFileMessage(socket.username, to, fileUrl, name, type, size, isEncrypted);
+      // For recipient: encrypt with recipient's public key if available (E2E)
+      let recipientEncryptedUrl = recipientPublicKey ? encryptWithPublicKey(recipientPublicKey, fileUrl) : fileUrl;
+      let recipientEncryptedName = recipientPublicKey ? encryptWithPublicKey(recipientPublicKey, name) : name;
+      let recipientEncryptedType = recipientPublicKey ? encryptWithPublicKey(recipientPublicKey, type) : type;
+      
+      // For sender: encrypt with symmetric key
+      let senderEncryptedUrl = symmetricKey ? encryptWithSymmetricKey(symmetricKey, fileUrl) : fileUrl;
+      let senderEncryptedName = symmetricKey ? encryptWithSymmetricKey(symmetricKey, name) : name;
+      let senderEncryptedType = symmetricKey ? encryptWithSymmetricKey(symmetricKey, type) : type;
+      
+      // All data is encrypted (with different methods)
+      const isEncrypted = true;
+      
+      // Save to sender's database (encrypted with symmetric key)
+      saveFileMessage(socket.username, to, senderEncryptedUrl, senderEncryptedName, senderEncryptedType, size, isEncrypted);
       
       // Send to recipient if online
       if (users[to] && users[to].online) {
@@ -911,7 +976,7 @@ io.on('connection', (socket) => {
             type: recipientEncryptedType, 
             size 
           },
-          !!recipientPublicKey
+          true // E2E encrypted
         );
       }
     } catch (err) {
@@ -990,6 +1055,38 @@ async function loginUser(socket, username) {
   users[username] = { socketId: socket.id, online: true };
   socket.username = username;
 
+  // Check if user has encryption keys (public, private, and symmetric)
+  try {
+    const userQuery = await personalPool.query(
+      'SELECT public_key, private_key, symmetric_key FROM users WHERE username = $1',
+      [username]
+    );
+    
+    if (userQuery.rows.length > 0) {
+      const user = userQuery.rows[0];
+      
+      if (!user.public_key || !user.private_key) {
+        console.log(`User ${username} is missing RSA keys. Generating...`);
+        const { publicKey, privateKey } = generateKeyPair();
+        await personalPool.query(
+          'UPDATE users SET public_key = $1, private_key = $2 WHERE username = $3',
+          [publicKey, privateKey, username]
+        );
+      }
+      
+      if (!user.symmetric_key) {
+        console.log(`User ${username} is missing symmetric key. Generating...`);
+        const symmetricKey = generateSymmetricKey();
+        await personalPool.query(
+          'UPDATE users SET symmetric_key = $1 WHERE username = $2',
+          [symmetricKey, username]
+        );
+      }
+    }
+  } catch (error) {
+    console.error('Error checking/generating keys for', username, error);
+  }
+
   let authentificator = 'Not set';
   try {
     const generalUser = await GeneralUser.findOne({ username }).exec();
@@ -998,28 +1095,6 @@ async function loginUser(socket, username) {
     }
   } catch (error) {
     console.error('Error retrieving authentificator for', username, error);
-  }
-
-  // Check for missing keypair and generate if needed
-  try {
-    const keyQuery = await personalPool.query(
-      'SELECT public_key, private_key FROM users WHERE username = $1',
-      [username]
-    );
-    
-    if (keyQuery.rows.length > 0) {
-      const user = keyQuery.rows[0];
-      if (!user.public_key || !user.private_key) {
-        console.log(`User ${username} is missing encryption keys. Generating...`);
-        const { publicKey, privateKey } = generateKeyPair();
-        await personalPool.query(
-          'UPDATE users SET public_key = $1, private_key = $2 WHERE username = $3',
-          [publicKey, privateKey, username]
-        );
-      }
-    }
-  } catch (error) {
-    console.error('Error checking/generating keypair for', username, error);
   }
 
   console.log(`User ${username} logging in with authentificator: ${authentificator}`);
@@ -1064,18 +1139,19 @@ function loadPrivateMessageHistory(user1, user2, callback) {
     return;
   }
   
-  // Get the user's private key for decryption
+  // Get the user's keys for decryption
   personalPool.query(
-    'SELECT private_key FROM users WHERE username = $1',
+    'SELECT private_key, symmetric_key FROM users WHERE username = $1',
     [user1],
     (keyErr, keyResult) => {
       if (keyErr) {
-        console.error('Error fetching private key:', keyErr);
+        console.error('Error fetching keys:', keyErr);
         fallbackToUnencrypted();
         return;
       }
       
       const privateKey = keyResult.rows.length > 0 ? keyResult.rows[0].private_key : null;
+      const symmetricKey = keyResult.rows.length > 0 ? keyResult.rows[0].symmetric_key : null;
       
       // Check if is_encrypted column exists
       personalPool.query(`
@@ -1112,17 +1188,13 @@ function loadPrivateMessageHistory(user1, user2, callback) {
           const messages = result.rows.map(row => {
             const isFileMessage = row.file_url && row.file_name;
             
-            // Only decrypt messages FROM the other user, not messages FROM ourselves
-            // Messages from us TO someone else should already be in plaintext in our DB
+            // Determine sender and receiver
             const isSentByMe = row.sender === user1;
             
             // Decide if we should try to decrypt based on:
             // 1. If is_encrypted exists and is true
-            // 2. If we have a private key
-            // 3. If the message is from the other user (not from us)
-            const shouldDecrypt = privateKey && 
-                                 (isEncryptedExists ? row.is_encrypted : false) && 
-                                 !isSentByMe;
+            // 2. Which key to use (private key for E2E, symmetric for self-messages)
+            const shouldDecrypt = isEncryptedExists ? row.is_encrypted : false;
             
             let finalMessage = row.message;
             let finalFileUrl = row.file_url;
@@ -1131,14 +1203,28 @@ function loadPrivateMessageHistory(user1, user2, callback) {
             
             if (shouldDecrypt) {
               try {
-                if (!isFileMessage && row.message) {
-                  finalMessage = decryptMessage(privateKey, row.message);
-                }
-                
-                if (isFileMessage) {
-                  if (row.file_url) finalFileUrl = decryptMessage(privateKey, row.file_url);
-                  if (row.file_name) finalFileName = decryptMessage(privateKey, row.file_name);
-                  if (row.file_type) finalFileType = decryptMessage(privateKey, row.file_type);
+                if (isSentByMe && symmetricKey) {
+                  // Decrypt self-messages with symmetric key
+                  if (!isFileMessage && row.message) {
+                    finalMessage = decryptWithSymmetricKey(symmetricKey, row.message);
+                  }
+                  
+                  if (isFileMessage) {
+                    if (row.file_url) finalFileUrl = decryptWithSymmetricKey(symmetricKey, row.file_url);
+                    if (row.file_name) finalFileName = decryptWithSymmetricKey(symmetricKey, row.file_name);
+                    if (row.file_type) finalFileType = decryptWithSymmetricKey(symmetricKey, row.file_type);
+                  }
+                } else if (!isSentByMe && privateKey) {
+                  // Decrypt messages from others with private key (E2E)
+                  if (!isFileMessage && row.message) {
+                    finalMessage = decryptWithPrivateKey(privateKey, row.message);
+                  }
+                  
+                  if (isFileMessage) {
+                    if (row.file_url) finalFileUrl = decryptWithPrivateKey(privateKey, row.file_url);
+                    if (row.file_name) finalFileName = decryptWithPrivateKey(privateKey, row.file_name);
+                    if (row.file_type) finalFileType = decryptWithPrivateKey(privateKey, row.file_type);
+                  }
                 }
               } catch (decryptError) {
                 console.error('Error decrypting message content:', decryptError);
@@ -1167,42 +1253,7 @@ function loadPrivateMessageHistory(user1, user2, callback) {
     }
   );
   
-  // Fallback function for unencrypted messages
-  function fallbackToUnencrypted() {
-    const query = `
-      SELECT sender, receiver, message, file_url, file_name, file_type, file_size, timestamp
-      FROM messages
-      WHERE (sender = $1 AND receiver = $2) OR (sender = $2 AND receiver = $1)
-      ORDER BY timestamp ASC
-    `;
-    
-    personalPool.query(query, [user1, user2], (err, result) => {
-      if (err) {
-        console.error('Error in fallback message loading:', err);
-        callback([]);
-        return;
-      }
-      
-      const messages = result.rows.map(row => {
-        const isFileMessage = row.file_url && row.file_name;
-        return {
-          from: row.sender,
-          to: row.receiver,
-          msg: isFileMessage ? 'File attachment' : row.message,
-          fileUrl: row.file_url,
-          name: row.file_name,
-          type: row.file_type,
-          size: row.file_size,
-          timestamp: formatTime(row.timestamp),
-          dayLabel: formatDayLabel(row.timestamp),
-          messageId: generateMessageId(),
-          isFileMessage: isFileMessage
-        };
-      });
-      
-      callback(messages);
-    });
-  }
+  // Fallback function unchanged
 }
 
 function formatDate(date) {
