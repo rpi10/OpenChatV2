@@ -1099,7 +1099,7 @@ io.on('connection', (socket) => {
       
       // Check if username already exists locally
       const localUserResult = await personalPool.query(
-        'SELECT * FROM users WHERE username = $1',
+        'SELECT username FROM users WHERE username = $1',
         [data.username]
       );
       
@@ -1110,7 +1110,7 @@ io.on('connection', (socket) => {
       
       // Check if this external user is already linked
       const externalCheckResult = await personalPool.query(
-        'SELECT * FROM external_databases WHERE username = $1',
+        'SELECT username FROM external_databases WHERE username = $1',
         [data.username]
       );
       
@@ -1129,7 +1129,8 @@ io.on('connection', (socket) => {
         // Verify connection by making a simple query
         await externalPool.query('SELECT NOW()');
         
-        // Get public key from external user
+        // Get public key from external user - don't reference any columns that might not exist
+        // Instead, just check if the user exists and retrieve only the public_key
         const externalUserResult = await externalPool.query(
           'SELECT public_key FROM users WHERE username = $1',
           [data.username]
@@ -1146,7 +1147,7 @@ io.on('connection', (socket) => {
           [data.username, data.databaseUrl, publicKey]
         );
         
-        // Insert local user's public key into remote database's external_databases table
+        // Get just the necessary public key from local database
         const myPublicKeyResult = await personalPool.query(
           'SELECT public_key FROM users WHERE username = $1',
           [socket.username]
@@ -1158,10 +1159,24 @@ io.on('connection', (socket) => {
         }
         
         // Add the local user to the remote database's external_databases table
-        await externalPool.query(
-          'INSERT INTO external_databases (username, database_url, public_key) VALUES ($1, $2, $3) ON CONFLICT (username) DO NOTHING',
-          [socket.username, process.env.DATABASE_URL, myPublicKey]
-        );
+        // First check if the external_databases table exists in external database
+        const tableCheckResult = await externalPool.query(`
+          SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_name = 'external_databases'
+          ) as has_external_table
+        `);
+        
+        if (tableCheckResult.rows[0].has_external_table) {
+          // Table exists, proceed with insertion
+          await externalPool.query(
+            'INSERT INTO external_databases (username, database_url, public_key) VALUES ($1, $2, $3) ON CONFLICT (username) DO NOTHING',
+            [socket.username, process.env.DATABASE_URL, myPublicKey]
+          );
+        } else {
+          console.log(`External database for ${data.username} doesn't have external_databases table yet`);
+        }
         
         // Update users list for the current socket
         updateUsersList(socket);
