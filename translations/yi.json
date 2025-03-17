@@ -1,0 +1,108 @@
+{
+    "nav.features": "Funktsyonen",
+    "nav.how_it_works": "Vi es shteyt",
+    "nav.get_started": "Onheybn",
+    
+    "hero.title": "Sicherer Shmues Ohn Kompromis",
+    "hero.description": "OpenChat iz a shmuess-platform mit sof-tsu-sof farshlislung. Keyn telefon-nummer, onentzentralizirt af design, un aleyn open source. A perfekte oyfshpas far di, vos hobn a groyse libshaft far privatkeyt – mit a bissele shpits fun humor!",
+    "hero.button.get_started": "Onheybn",
+    "hero.button.learn_more": "Lern Meer",
+    
+    "features.section_title": "Farvos zoln dir kiesn OpenChat?",
+    "features.section_description": "Erlebn di tsukunft fun zichere shmues mit funktsyonen vos shteln far bashitshn dayne privatkeyt un farshtern dayne kommunikesye – un mit a leykhe bissele far di lebn!",
+    
+    "features.e2ee.title": "Sof-tsu-sof Farshlislung",
+    "features.e2ee.description": "Ale nachrichten vos zaynen geshikt vegn OpenChat zaynen farshlislert op dayn geret, un ken nor dayn empfenger zey entshlisln. Oyb a nar intersepts di daten, vel er nor a haufen onlesleche teychim zein!",
+    
+    "features.no_phone.title": "Identitet Ohn Telefon-Nummer",
+    "features.no_phone.description": "Anders vi andre shmues-apps, fregt OpenChat keyn telefon-nummer far a konto. Dos shutzt dayne privatkeyt un makht der service zuganklich far yeder mit a internet-verkher – mit sichere identitetn basirt af kriptografishe kleys.",
+    
+    "features.decentralized.title": "Onentzentralizirte Arkhitektur",
+    "features.decentralized.description": "Batzirt af farbindene databases vos zaynen gehost fun yuser in der cloud, makhn a shtarker netz vos ken nisht gefaln mit an eykh klap fun fingern!",
+    
+    "features.open_source.title": "Open Source",
+    "features.open_source.description": "Der kode iz fargeshnoybn un oysgeton, vos yeder ken oyskiken, ubeyrn un bakumen. Keyn geheymn tor – alles opklor!",
+    
+    "features.european.title": "Yuropeyish Nokh Design",
+    "features.european.description": "OpenChat iz 100% gemakh in Yurope, mit yuropeyishe werte far privatkeyt. Folln GDPR un keyn Silicon Valley ozoy – gevezn!",
+    
+    "how_it_works.section_title": "Vi Arbeyt OpenChat",
+    "how_it_works.section_description": "Zog mir, vi der digitaler magye shtot in OpenChat? Farsteh di teknologye bakn a zichere un onentzentralizirter shmues-platform – a maysel fun digitaler magye!",
+    
+    "how_it_works.step1.title": "Onentzentralizirter Database-Netz",
+    "how_it_works.step1.description": "OpenChat fiyrt farbindene databases vos zaynen gehost fun di yuser in der cloud. Anders vi tsentralizirte apps, shafn mir a netz fun farbindene knoydn, yeder farshlislend daten. Dos heyst keyn eynik punkt fun feler un keyn tseyn tsentral organisatsye vos kikht oyf dayne shmuesn.",
+    
+    "how_it_works.step2.title": "Sof-tsu-sof Farshlislung",
+    "how_it_works.step2.description": "Ale nachrichten vos zaynen geshikt vegn OpenChat zaynen farshlislert op dayn geret, un ken nor dayn empfenger zey entshlisln.",
+    
+    "how_it_works.step3.title": "Identitet Ohn Telefon-Nummer",
+    "how_it_works.step3.description": "Anders vi andre shmues-apps, fregt OpenChat keyn telefon-nummer far a konto. Dos shutzt dayne privatkeyt un makht der service zuganklich far yeder mit a internet-verkher – mit sichere identitetn basirt af kriptografishe kleys.",
+    
+    "how_it_works.step4.title": "Open Source Entviklung",
+    "how_it_works.step4.description": "Der kode fun OpenChat iz aleyn open source, az yeder ken oyskiken, farshteyn zayn sicherhayt un bakumen ferbesserungen. Di tsuzamenarbeyt shtelt sicher az di platform blaybt zicher, on-oyfgeheybt, un fray fun geheymn vulnerabilities.",
+    
+    "cta.section_title": "Reygt tsu onheybn?",
+    "cta.section_description": "Treyt tsu di sichere shmues revolutsye haynt. Deployir dayn eygene OpenChat instance oder lern mer vi es arbeyt.",
+    "cta.button.deploy": "Deploy mit Railway",
+    "cta.button.documentation": "Lern der Dokumentatsye",
+    
+    "footer.links.features": "Funktsyonen",
+    "footer.links.how_it_works": "Vi es shteyt",
+    "footer.links.github": "GitHub",
+    "footer.links.get_started": "Onheybn",
+    
+    "footer.copyright": "© 2025 OpenChat. Ale rekht farbylt. Open source sichere shmues far alemen.",
+    
+    "railway.title": "Railway Templet Deploymunt Gaid",
+    "railway.subtitle": "Lants dir eygene OpenChat onzuvayzn, ohn az du verlierst dayn kop! Nisht fregn, oyb du host nokh keyn fancy deploy gehat vi a tweet – di gid vet dir makhn a deploymunt zauberer shneler vi du ken zogn \"Vu iz der undo knop?\"",
+    
+    "railway.step1.title": "Registrir dir af Railway",
+    "railway.step1.intro": "Farbeyt, du darfst bashteyen a konto af Railway:",
+    "railway.step1.list.item1": "Klick af der \"Deploy on Railway\" knop fun di unter in di gid.",
+    "railway.step1.list.item2": "Op der Railway seyt, klick af \"Sign Up\" in der oytserre reytn hoek.",
+    "railway.step1.list.item3": "Zukhn \"Continue with Email\" fun di opshn.",
+    "railway.step1.list.item4": "Dann klick af \"Continue with Google\" tsu registrirn mit dayn Google konto.",
+    "railway.step1.list.item5": "Mach tzu di Google auth process.",
+    "railway.step1.joke": "Vu hot der developir gehat oysgeyn? Viln zayn, er hot aleyn gevust zayn cache! Nisht fregn, Railway hot fil cache far dayn app.",
+    "railway.step1.note": "<strong>Notiz:</strong> Railway darft a konto tsu deployn templates. Zikh tsu shteyen mit Google – es iz der shnelster veg, afile du nist nokh mit piganers far email.",
+    
+    "railway.step2.title": "Deployir der Templet",
+    "railway.step2.intro": "Nakh der login vest du vegn tsu di templet deploymunt seyt:",
+    "railway.step2.list.item1": "Zayk di details fun templet un di setup opshn.",
+    "railway.step2.list.item2": "Klick af der \"Deploy\" knop tsu onhebn der deploy process.",
+    "railway.step2.list.item3": "Railway vet dir fregn tsu makhn a nay project mit dem templet.",
+    "railway.step2.list.item4": "Di default settings zaynen geveyn tsu di meiste benutzer.",
+    "railway.step2.joke": "Ikh hob gezegt fun mayn komp'yuter az ikh hob a break fun deploy. Er hot gefregt, hob ikh probirt tsu onhebn un oyfhebn. Klassiker IT humor!",
+    "railway.step2.note": "<strong>Tip:</strong> Oyb du darfst customize di environment variables oder andre settings, du ken dos ton afile dem deploy. Bloyz, nemt nisht di nomen fun dayne pets – dos makht debug awkward.",
+    
+    "railway.step3.title": "Vayte af tsu der deploy kumen",
+    "railway.step3.intro": "Railway vet itso initsializn un deployir dayn project:",
+    "railway.step3.list.item1": "Du vest zayn a progress indicator vos zeigt der status fun deploy.",
+    "railway.step3.list.item2": "Der system vet provision resources, install dependencies un build dayn app.",
+    "railway.step3.list.item3": "Dos process nimt 2-5 minutn.",
+    "railway.step3.list.item4": "Du vest zayn a grine checkmark (✓) ven der deploy iz successful.",
+    "railway.step3.joke": "Deploy progress bars zaynen vi mikrowellen eten – zey geyen tsurik af 90% in sekunden, un den nemen zey di letzte 10% vi a ewichkeit. Zeit tsu nemen a kaffe!",
+    "railway.step3.note": "<strong>Vichtig:</strong> Zay nisht tsu makhn tsu tsu closing der browser tab während der deploy. Dos geit af in background, ober dayn anxiety level ken vaksn 200%.",
+    
+    "railway.step4.title": "Zayk dayn Deploy URL",
+    "railway.step4.intro": "Ven der deploy iz ful, ken du bashteyn dayn app:",
+    "railway.step4.list.item1": "Zukhn der \"Deployments\" sektsye in dayn project dashboard.",
+    "railway.step4.list.item2": "Fayn der recently successful deploy.",
+    "railway.step4.list.item3": "Klick af der deploy tsu zein details.",
+    "railway.step4.list.item4": "Zukhn der \"Domains\" sektsye tsu fayn dayn app URL.",
+    "railway.step4.list.item5": "Der URL vet zein vi: https://dayn-proyekt-name.railway.app",
+    "railway.step4.joke": "Dayn nay URL iz vi dayn app's ershte heymadres. Shik a virtual housewarming party invite tsu ale dayne developer chaverim!",
+    "railway.step4.note": "<strong>Success:</strong> Dayn app iz nun live! Du ken teilen dayn URL mit andere tsu bashteyn dayn deployt project. Zolst dreyen a victory dance – mir vet nisht urteilen.",
+    
+    "railway.step5.title": "Monitor un Manage Dayn Proyekt",
+    "railway.step5.intro": "Railway gevt tools tsu monitor un manage dayn deploy:",
+    "railway.step5.list.item1": "Bruk di \"Metrics\" tab tsu zein resource usage un performance.",
+    "railway.step5.list.item2": "Kuk in di \"Logs\" sektsye tsu troubleshoot any issues.",
+    "railway.step5.list.item3": "Du ken makhn changes in dayn project configuration in di \"Variables\" sektsye.",
+    "railway.step5.list.item4": "Oif advanced settings, shik di \"Settings\" tab.",
+    "railway.step5.joke": "Oysgehalten di logs fun deploy iz vi a reality show far software engineers. 'Oy vey! Zog mir, vu iz der error? Ikh ken nisht gloybn es hot gemacht!'",
+    "railway.step5.note": "<strong>Notiz:</strong> Railway bietet a generous free tier, ober du ken shteln upgrade far projects mit hohe resource requirements. Dayn app iz vi a growing teenager – it ken behovn more resources vi du hobst initially gedacht.",
+    
+    "railway.deploy_button": "Deploy mit Railway"
+  }
+  
