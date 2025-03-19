@@ -851,33 +851,15 @@ io.on('connection', (socket) => {
       // Both are encrypted, just with different methods
       const isEncrypted = true;
       
-      // Save message to database
-      await saveMessage(socket.username, to, senderStoredMsg, isEncrypted);
-
-      // Emit to both sender and receiver rooms immediately
-      io.to(socket.id).emit('chat message', message);
-      const recipientSocket = Object.values(io.sockets.sockets).find(
-        s => s.username === to
-      );
-      if (recipientSocket) {
-        io.to(recipientSocket.id).emit('chat message', message);
+      // Save message to local database (encrypted with symmetric key)
+      saveMessage(socket.username, to, senderStoredMsg, isEncrypted);
+      
+      // Emit message to the sender and receiver
+      io.to(socket.id).emit('chat message', message); // Emit to sender
+      if (users[to] && users[to].socketId) {
+        io.to(users[to].socketId).emit('chat message', message); // Emit to receiver
       }
-
-      // Handle push notification if recipient is offline
-      if (!users[to]?.online) {
-        const recipientQuery = await personalPool.query(
-          'SELECT push_subscription FROM users WHERE username = $1',
-          [to]
-        );
-        if (recipientQuery.rows[0]?.push_subscription) {
-          const subscription = JSON.parse(recipientQuery.rows[0].push_subscription);
-          await sendPushNotification(subscription, {
-            title: `New message from ${socket.username}`,
-            body: msg
-          });
-        }
-      }
-
+      
       // Cross-database messaging
       const recipientExternalResult = await personalPool.query(
         'SELECT * FROM external_databases WHERE username = $1', 
@@ -900,13 +882,13 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('file message', async ({ to, fileUrl, name, type, size }) => {
+  socket.on('file message', async ({ to, fileUrl, name, type, size, transcription }) => {
     if (!socket.username) return;
     const now = new Date();
     const messageId = generateMessageId();
     const message = {
       from: socket.username,
-      fileUrl,
+      fileUrl: fileUrl,
       fileName: name,
       fileType: type,
       fileSize: size,
@@ -918,33 +900,80 @@ io.on('connection', (socket) => {
     };
 
     try {
-      // ...existing encryption code...
-
-      // Save file message to database
-      await saveFileMessage(socket.username, to, fileUrl, name, type, size, isEncrypted);
-
-      // Emit to both sender and receiver rooms immediately
-      io.to(socket.id).emit('file message', message);
-      const recipientSocket = Object.values(io.sockets.sockets).find(
-        s => s.username === to
+      // Get recipient's public key for encryption
+      let recipientPublicKey = null;
+      const userQuery = await personalPool.query(
+        'SELECT public_key FROM users WHERE username = $1',
+        [to]
       );
-      if (recipientSocket) {
-        io.to(recipientSocket.id).emit('file message', message);
+      
+      if (userQuery.rows.length > 0 && userQuery.rows[0].public_key) {
+        recipientPublicKey = userQuery.rows[0].public_key;
       }
-
-      // Handle push notification for offline recipient
-      if (!users[to]?.online) {
-        const recipientQuery = await personalPool.query(
-          'SELECT push_subscription FROM users WHERE username = $1',
+      
+      // Also check external database users
+      if (!recipientPublicKey) {
+        const externalUserQuery = await personalPool.query(
+          'SELECT public_key FROM external_databases WHERE username = $1',
           [to]
         );
-        if (recipientQuery.rows[0]?.push_subscription) {
-          const subscription = JSON.parse(recipientQuery.rows[0].push_subscription);
-          await sendPushNotification(subscription, {
-            title: `New file from ${socket.username}`,
-            body: `Sent you a file: ${name}`
-          });
+        
+        if (externalUserQuery.rows.length > 0 && externalUserQuery.rows[0].public_key) {
+          recipientPublicKey = externalUserQuery.rows[0].public_key;
         }
+      }
+      
+      // Get sender's symmetric key for self-encryption
+      const senderQuery = await personalPool.query(
+        'SELECT symmetric_key FROM users WHERE username = $1',
+        [socket.username]
+      );
+      
+      const symmetricKey = senderQuery.rows.length > 0 ? senderQuery.rows[0].symmetric_key : null;
+      
+      // For recipient: encrypt with recipient's key if available
+      let recipientEncryptedUrl = recipientPublicKey ? encryptWithPublicKey(recipientPublicKey, fileUrl) : fileUrl;
+      let recipientEncryptedName = recipientPublicKey ? encryptWithPublicKey(recipientPublicKey, name) : name;
+      let recipientEncryptedType = recipientPublicKey ? encryptWithPublicKey(recipientPublicKey, type) : type;
+      
+      // For sender: encrypt with symmetric key
+      let senderEncryptedUrl = symmetricKey ? encryptWithSymmetricKey(symmetricKey, fileUrl) : fileUrl;
+      let senderEncryptedName = symmetricKey ? encryptWithSymmetricKey(symmetricKey, name) : name;
+      let senderEncryptedType = symmetricKey ? encryptWithSymmetricKey(symmetricKey, type) : type;
+      
+      // All data is encrypted (with different methods)
+      const isEncrypted = true;
+      
+      // Save to sender's database (encrypted with symmetric key)
+      saveFileMessage(socket.username, to, senderEncryptedUrl, senderEncryptedName, senderEncryptedType, size, isEncrypted);
+      
+      // Emit file message to the sender and receiver
+      io.to(socket.id).emit('file message', message); // Emit to sender
+      if (users[to] && users[to].socketId) {
+        io.to(users[to].socketId).emit('file message', message); // Emit to receiver
+      }
+      
+      // Cross-database file message handling
+      const recipientExternalResult = await personalPool.query(
+        'SELECT * FROM external_databases WHERE username = $1', 
+        [to]
+      );
+      
+      if (recipientExternalResult.rows.length > 0) {
+        const recipientDB = recipientExternalResult.rows[0];
+        saveMessageToExternalDB(
+          recipientDB.database_url, 
+          socket.username, 
+          to, 
+          null, 
+          { 
+            fileUrl: recipientEncryptedUrl, 
+            name: recipientEncryptedName, 
+            type: recipientEncryptedType, 
+            size 
+          },
+          true
+        );
       }
     } catch (err) {
       console.error('Error in file message:', err);
@@ -969,8 +998,17 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', () => {
     if (socket.username) {
-      delete users[socket.username];
-      personalPool.query('UPDATE users SET online = FALSE WHERE username = $1', [socket.username]);
+      personalPool.query('UPDATE users SET online = FALSE WHERE username = $1', [socket.username], (err) => {
+        if (err) console.error('Error marking user offline:', err);
+        if (users[socket.username]) {
+          users[socket.username].online = false;
+        }
+        for (const [id, sock] of io.of("/").sockets) {
+          if (sock.username) {
+            loadCombinedUsers(sock);
+          }
+        }
+      });
     }
     console.log('A user disconnected');
   });
