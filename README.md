@@ -7,7 +7,7 @@
   <br>
   <br>
 
-  [![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/template/openchat)
+  [![Deploy on Railway](https://railway.app/button.svg)](https://railway.com/template/6zTNV1)
   ![License](https://img.shields.io/github/license/rpi10/openchatv2)
   ![Stars](https://img.shields.io/github/stars/rpi10/openchatv2?style=social)
   
