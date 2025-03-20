@@ -1,7 +1,7 @@
 # OpenChat
 
 <div align="center">
-  <img src="https://via.placeholder.com/150" alt="OpenChat Logo" width="150"/>
+  <img src="openchatlogo.png" alt="OpenChat Logo" width="150"/>
   <br>
   <strong>A secure, decentralized messaging platform</strong>
   <br>
