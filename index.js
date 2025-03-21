@@ -1,3 +1,4 @@
+
 import express from 'express';
 import multer from 'multer';
 import B2 from 'backblaze-b2';
@@ -854,11 +855,20 @@ io.on('connection', (socket) => {
       // Save message to local database (encrypted with symmetric key)
       saveMessage(socket.username, to, senderStoredMsg, isEncrypted);
       
-      // Emit message to the sender and receiver
-      io.to(socket.id).emit('chat message', message); // Emit to sender
-      if (users[to] && users[to].socketId) {
-        io.to(users[to].socketId).emit('chat message', message); // Emit to receiver
+      // Send to recipient if online
+      if (users[to] && users[to].online) {
+        io.to(users[to].socketId).emit('chat message', message);
+        io.to(users[to].socketId).emit('notification', `New message from ${socket.username}`);
+        if (users[to].pushSubscription) {
+          sendPushNotification(JSON.parse(users[to].pushSubscription), {
+            title: 'New Message',
+            body: `You have a new message from ${socket.username}`
+          });
+        }
       }
+      
+      // Send back to sender for UI update
+      socket.emit('chat message', message);
       
       // Cross-database messaging
       const recipientExternalResult = await personalPool.query(
@@ -947,11 +957,14 @@ io.on('connection', (socket) => {
       // Save to sender's database (encrypted with symmetric key)
       saveFileMessage(socket.username, to, senderEncryptedUrl, senderEncryptedName, senderEncryptedType, size, isEncrypted);
       
-      // Emit file message to the sender and receiver
-      io.to(socket.id).emit('file message', message); // Emit to sender
-      if (users[to] && users[to].socketId) {
-        io.to(users[to].socketId).emit('file message', message); // Emit to receiver
+      // Send to recipient if online
+      if (users[to] && users[to].online) {
+        io.to(users[to].socketId).emit('file message', message);
+        io.to(users[to].socketId).emit('notification', `New file from ${socket.username}`);
       }
+      
+      // Send back to sender for UI update (just once)
+      socket.emit('file message', message);
       
       // Cross-database file message handling
       const recipientExternalResult = await personalPool.query(
